@@ -100,6 +100,47 @@ class StripFrameworksTests(unittest.TestCase):
         self.assertIn("loaded by Runner", str(e.exception.code))
         self.assertTrue((self.app / "Frameworks/Agora.framework").exists())
 
+    def test_executable_relative_hard_load_refused(self):
+        self.runner([(LOAD, "@executable_path/Frameworks/Required.framework/Required")])
+        framework = self.framework("Required")
+        with self.assertRaises(SystemExit) as error:
+            self.strip("Required")
+        self.assertIn("loaded by Runner", str(error.exception.code))
+        self.assertTrue(framework.exists())
+
+    def test_loader_relative_hard_load_refused(self):
+        self.runner([])
+        framework = self.framework("Required")
+        self.framework("Plugin", thin([(LOAD, "@loader_path/../Required.framework/Required")]))
+        with self.assertRaises(SystemExit) as error:
+            self.strip("Required")
+        self.assertIn("Frameworks/Plugin.framework/Plugin", str(error.exception.code))
+        self.assertTrue(framework.exists())
+
+    def test_extension_executable_path_uses_its_own_bundle(self):
+        self.runner([])
+        self.framework("Required")
+        extension = self.app / "PlugIns/Share.appex"
+        framework = extension / "Frameworks/Required.framework"
+        framework.mkdir(parents=True)
+        (framework / "Required").write_bytes(thin([]))
+        (extension / "Share").write_bytes(
+            thin([(LOAD, "@executable_path/Frameworks/Required.framework/Required")]))
+        self.assertEqual(self.strip("Required")[0], ["Required"])
+        self.assertTrue(framework.exists())
+
+    def test_extension_hard_load_of_app_framework_refused(self):
+        self.runner([])
+        framework = self.framework("Required")
+        extension = self.app / "PlugIns/Share.appex"
+        extension.mkdir(parents=True)
+        (extension / "Share").write_bytes(
+            thin([(LOAD, "@executable_path/../../Frameworks/Required.framework/Required")]))
+        with self.assertRaises(SystemExit) as error:
+            self.strip("Required")
+        self.assertIn("PlugIns/Share.appex/Share", str(error.exception.code))
+        self.assertTrue(framework.exists())
+
     def test_row3_weak_load_removed(self):
         self.runner([(WEAK, rpath("Optional"))])
         self.framework("Optional")

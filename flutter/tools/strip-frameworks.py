@@ -8,11 +8,11 @@ On a Mac this is an archive strip and an `xcodebuild -exportArchive`, because
 Xcode has already signed the bundle; here signing comes later, so removing
 the directory is the whole step.
 
-A framework that another image in the app still loads (LC_LOAD_DYLIB,
-LC_REEXPORT_DYLIB or LC_LOAD_UPWARD_DYLIB of @rpath/<Name>.framework/...) is
-not removed: dyld would refuse to launch the app. The script stops and names
-the image that loads it. A weak load (LC_LOAD_WEAK_DYLIB) is fine. A name
-that is not in the app is reported and skipped.
+A framework that another image in the app still hard-loads is not removed:
+dyld would refuse to launch the app. The script checks @rpath, @loader_path
+and @executable_path loads and names the image that loads it. A weak load
+(LC_LOAD_WEAK_DYLIB) is fine. A name that is not in the app is reported and
+skipped.
 """
 import os
 import re
@@ -75,13 +75,20 @@ def dylib_loads(path):
 
 def hard_users(app, name, removing):
     """Images outside the frameworks being removed that hard-load <name>.framework."""
-    prefix = f"@rpath/{name}.framework/"
+    target = (app / "Frameworks" / f"{name}.framework").resolve()
     users = []
     for path in sorted(app.rglob("*")):
         if not path.is_file() or path.is_symlink() or any(r in path.parents for r in removing):
             continue
-        if any(cmd in HARD_LOADS and lib.startswith(prefix) for cmd, lib in dylib_loads(path)):
-            users.append(path.relative_to(app))
+        executable_dir = next((p for p in path.parents if p.suffix in (".app", ".appex")), app)
+        roots = {"@rpath": app / "Frameworks", "@loader_path": path.parent,
+                 "@executable_path": executable_dir}
+        for cmd, lib in dylib_loads(path):
+            prefix, separator, relative = lib.partition("/")
+            if (cmd in HARD_LOADS and separator and prefix in roots
+                    and target in (roots[prefix] / relative).resolve().parents):
+                users.append(path.relative_to(app))
+                break
     return users
 
 
