@@ -76,17 +76,19 @@ def dylib_loads(path):
 def hard_users(app, name, removing):
     """Images outside the frameworks being removed that hard-load <name>.framework."""
     target = (app / "Frameworks" / f"{name}.framework").resolve()
+    bundles = [app] + [p for p in app.rglob("*") if p.is_dir() and p.suffix in (".app", ".appex")]
     users = []
     for path in sorted(app.rglob("*")):
         if not path.is_file() or path.is_symlink() or any(r in path.parents for r in removing):
             continue
         executable_dir = next((p for p in path.parents if p.suffix in (".app", ".appex")), app)
-        roots = {"@rpath": app / "Frameworks", "@loader_path": path.parent,
-                 "@executable_path": executable_dir}
+        executable_dirs = bundles if app / "Frameworks" in path.parents else [executable_dir]
+        roots = {"@rpath": [app / "Frameworks"], "@loader_path": [path.parent],
+                 "@executable_path": executable_dirs}
         for cmd, lib in dylib_loads(path):
             prefix, separator, relative = lib.partition("/")
             if (cmd in HARD_LOADS and separator and prefix in roots
-                    and target in (roots[prefix] / relative).resolve().parents):
+                    and any(target in (root / relative).resolve().parents for root in roots[prefix])):
                 users.append(path.relative_to(app))
                 break
     return users

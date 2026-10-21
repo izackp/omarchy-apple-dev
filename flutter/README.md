@@ -41,8 +41,10 @@ framework that the rest of the app still loads (a non-weak `LC_LOAD_DYLIB`,
 `LC_REEXPORT_DYLIB` or `LC_LOAD_UPWARD_DYLIB`), since dyld would stop the
 app at launch, and it names the image that loads it. The check resolves
 `@loader_path` from the loading image and `@executable_path` from its app
-or extension bundle. `@rpath` loads are checked against the app
-`Frameworks` directory. A name that is not in the app is reported and skipped.
+or extension bundle. Shared app frameworks are checked against all app and
+extension executable directories, so a possible hard load blocks removal.
+`@rpath` loads are checked against the app `Frameworks` directory.
+A name that is not in the app is reported and skipped.
 
 `build/ios-linux/dSYMs` holds a dSYM for each Mach-O image in the app, as
 an Xcode archive's `dSYMs` folder does, for Crashlytics, Sentry or App Store

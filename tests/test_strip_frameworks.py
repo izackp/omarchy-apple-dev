@@ -141,6 +141,20 @@ class StripFrameworksTests(unittest.TestCase):
         self.assertIn("PlugIns/Share.appex/Share", str(error.exception.code))
         self.assertTrue(framework.exists())
 
+    def test_shared_framework_uses_extension_executable_path(self):
+        self.runner([])
+        framework = self.framework("Required")
+        self.framework("Plugin", thin([
+            (LOAD, "@executable_path/../../Frameworks/Required.framework/Required")]))
+        extension = self.app / "PlugIns/Share.appex"
+        extension.mkdir(parents=True)
+        (extension / "Share").write_bytes(
+            thin([(LOAD, "@executable_path/../../Frameworks/Plugin.framework/Plugin")]))
+        with self.assertRaises(SystemExit) as error:
+            self.strip("Required")
+        self.assertIn("Frameworks/Plugin.framework/Plugin", str(error.exception.code))
+        self.assertTrue(framework.exists())
+
     def test_row3_weak_load_removed(self):
         self.runner([(WEAK, rpath("Optional"))])
         self.framework("Optional")

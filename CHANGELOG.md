@@ -13,7 +13,7 @@
 - `flutter/build.sh` reads `STRIP_FRAMEWORKS`, frameworks to leave out of the app (names without `.framework`, separated by spaces or commas). On a Mac this is an archive strip and an `xcodebuild -exportArchive`; here signing comes later, so `flutter/tools/strip-frameworks.py` removes the directories before `Runner.ipa` is zipped.
 - The tool reads the load commands of every image left in the app, thin or fat, and refuses a framework that is still loaded through a non-weak `LC_LOAD_DYLIB`, `LC_REEXPORT_DYLIB` or `LC_LOAD_UPWARD_DYLIB`, naming the loader: dyld would stop the app at launch. A weak load is allowed, and a name that is not in the app is skipped. `tests/test_strip_frameworks.py` covers it with synthetic Mach-O images and three mutants.
 - An empty field in `STRIP_FRAMEWORKS` (`A,,B`, `A B,`) is dropped instead of passed on: the tool refuses an empty name, so a trailing separator stopped the build. `tests/test_strip_frameworks.py` runs the parsing block from `build.sh` in bash to hold that.
-- Framework checks now resolve `@loader_path` and `@executable_path` loads as well as `@rpath`. Each extension uses its own executable directory. Regression tests cover both missed load prefixes and extension paths.
+- Framework checks now resolve `@loader_path` and `@executable_path` loads as well as `@rpath`. Each extension uses its own executable directory. Shared app frameworks are checked against every app and extension executable directory. Regression tests cover both missed load prefixes and shared framework dependencies.
 
 ### dSYMs for Flutter builds
 
