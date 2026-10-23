@@ -506,12 +506,18 @@ if [ "${1:-}" = "--repair" ]; then
   fi
   swift --version | head -n1
   toolchain_first_on_path
-  cached=$(ls -dt "$SDK_CACHE"/darwin-*.xtoolsdk 2>/dev/null | head -n1 || true)
-  # A cache built by an older xtool would be registered and then refused by `xtool dev`.
-  if [ -n "$cached" ] && [ "$(sdk_state "$cached" "$XTOOL_SDK_VERSION")" = stale ]; then
-    sdk_stale_note "$(sdk_bundle_version "$cached")" "$XTOOL_SDK_VERSION"
-    echo "Not re-registering the cached bundle $cached"
-    cached=
+  # repair: newest cached bundle that carries the pinned xtool's stamp. One built by an older xtool
+  # would be registered and then refused by `xtool dev`.
+  cached=
+  stale_seen=
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    if [ "$(sdk_state "$c" "$XTOOL_SDK_VERSION")" = current ]; then cached=$c; break; fi
+    [ -n "$stale_seen" ] || stale_seen=$c
+  done < <(ls -dt "$SDK_CACHE"/darwin-*.xtoolsdk 2>/dev/null || true)
+  if [ -z "$cached" ] && [ -n "$stale_seen" ]; then
+    sdk_stale_note "$(sdk_bundle_version "$stale_seen")" "$XTOOL_SDK_VERSION"
+    echo "Not re-registering the cached bundle $stale_seen"
   fi
   if [ -n "$cached" ]; then
     sdk_install_from "$cached"

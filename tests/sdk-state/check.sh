@@ -31,7 +31,7 @@ mk cur "$EXP"; mk old "$STALE"; mk nover ""
 
 # Cut the real blocks out of the installer.
 sed -n '/^sdk_reg=none$/,/^swift sdk list   # must print: darwin$/p' "$ROOT/install-toolchain.sh" | sed '$d' >"$T/step6.sh"
-awk '/^  cached=\$\(ls -dt "\$SDK_CACHE"\/darwin-\*\.xtoolsdk/{on=1} on&&/^  swift sdk list   # must print: darwin$/{exit} on' "$ROOT/install-toolchain.sh" >"$T/repair.sh"
+awk '/^  # repair: newest cached bundle/{on=1} on&&/^  swift sdk list   # must print: darwin$/{exit} on' "$ROOT/install-toolchain.sh" >"$T/repair.sh"
 [ -s "$T/step6.sh" ] && [ -s "$T/repair.sh" ] && ok "blocks extracted" || { bad "blocks extracted"; exit 1; }
 
 # run BLOCK.sh: env STUB_REG=1 means swift sdk list prints darwin.
@@ -68,6 +68,11 @@ check_repair() {
   printf '%s\n' "$EXP" >"$T/cc/darwin-iPhoneOS99.xtoolsdk/darwin-sdk-version.txt"
   out=$(run "$b" "$T/cur" "$T/cc" no no 1); want "$l cache current: registered" "$out" "REGISTER darwin-iPhoneOS99" 1
   out=$(run "$b" "$T/cur" "$T/cs" no no 1); want "$l cache stale, no xip: not registered" "$out" "REGISTER" 0; want "$l cache stale, no xip: says so" "$out" "older xtool" 1
+  mkdir -p "$T/cm/darwin-iPhoneOS98.xtoolsdk" "$T/cm/darwin-iPhoneOS99.xtoolsdk"
+  printf '%s\n' "$EXP" >"$T/cm/darwin-iPhoneOS98.xtoolsdk/darwin-sdk-version.txt"
+  printf '%s\n' "$STALE" >"$T/cm/darwin-iPhoneOS99.xtoolsdk/darwin-sdk-version.txt"
+  touch -d '2 hours ago' "$T/cm/darwin-iPhoneOS98.xtoolsdk"
+  out=$(run "$b" "$T/cur" "$T/cm" no no 1); want "$l newest stale, older current: registers the older" "$out" "REGISTER darwin-iPhoneOS98" 1
   out=$(run "$b" "$T/cur" "$T/cs" yes no 1); want "$l cache stale+xip: rebuilt" "$out" "BUILD Xcode.xip" 1; want "$l cache stale+xip: not registered stale" "$out" "REGISTER darwin-iPhoneOS99" 0
 }
 check_step6 "$T/step6.sh" "step6"
@@ -75,7 +80,7 @@ check_repair "$T/repair.sh" "repair"
 
 # Mutants: the old behaviour must be caught.
 sed 's/\[ "\$sdk_reg" = current \]/[ "$sdk_reg" != none ]/' "$T/step6.sh" >"$T/step6.mut"
-sed 's/= stale \]; then/= NEVER ]; then/' "$T/repair.sh" >"$T/repair.mut"
+sed 's/= current \]; then cached=\$c; break; fi/!= none ]; then cached=$c; break; fi/' "$T/repair.sh" >"$T/repair.mut"
 cmp -s "$T/step6.sh" "$T/step6.mut" && bad "mutant 1 did not change the block"
 cmp -s "$T/repair.sh" "$T/repair.mut" && bad "mutant 2 did not change the block"
 n=$(fail=0; check_step6 "$T/step6.mut" m1 | grep -c '^FAIL'); [ "$n" -gt 0 ] && ok "mutant 1 (skip when registered) killed by $n checks" || bad "mutant 1 survived"
