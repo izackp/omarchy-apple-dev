@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.2
 
 ### A stale Darwin SDK is rebuilt, not skipped
 

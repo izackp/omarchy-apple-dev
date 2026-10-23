@@ -6,6 +6,7 @@
 set -uo pipefail
 here=$(dirname "$(readlink -f "$0")")
 script=${INSTALLER:-$here/../../install-toolchain.sh}
+sdk_version=$(sed -n 's/^XTOOL_SDK_VERSION="\(.*\)"$/\1/p' "$script")
 fail=0
 CLEANUP=()
 tmpworld() { # new temp dir, registered for cleanup
@@ -114,7 +115,8 @@ run_repair() { # BLOCK HELPERS: runs the extracted --repair block; one shared or
   fi
   env HOME="$home" PATH="$p" FAKE_LOG="$home/order.log" SETUP_LOG="$home/order.log" \
     MODE="$rmode" MODE_FILE="$home/.config/omarchy-apple-dev/mode" VENV="$venv_dir" \
-    REPO_DIR="$home/repodir" SDK_CACHE="$home/sdkcache" \
+    REPO_DIR="$home/repodir" SDK_CACHE="$home/sdkcache" SDK_SRC="$home/sdk-src" \
+    XTOOL_SDK_VERSION="$sdk_version" SDK_HELPERS="$here/../../tools/sdk-state.sh" \
     bash -c '
       set -uo pipefail
       sdk_install_from() { :; }
@@ -122,6 +124,7 @@ run_repair() { # BLOCK HELPERS: runs the extracted --repair block; one shared or
       install_oam() { :; }
       survive_status() { :; }
       toolchain_first_on_path() { :; }
+      source "$SDK_HELPERS"
       source "$2"
       source "$0"
     ' "$block" --repair "$helpers" 2>&1
@@ -439,6 +442,7 @@ check_repair_full_rebuilds() { # full mode: repair still rebuilds a broken venv
   printf '#!/usr/bin/env bash\necho "Swift version 6.4.0"\n' >"$swiftdir/swift"
   chmod +x "$swiftdir/swift"
   mkdir -p "$home/sdkcache/darwin-iPhoneOS27.0.xtoolsdk"
+  printf '%s\n' "$sdk_version" >"$home/sdkcache/darwin-iPhoneOS27.0.xtoolsdk/darwin-sdk-version.txt"
   : >"$home/order.log"
   rmode=full
   rmodefile=

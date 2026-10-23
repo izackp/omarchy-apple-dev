@@ -34,6 +34,9 @@ bash tests/install-mode.sh || fail=1
 echo "== tests/install-venv/run.sh"
 bash tests/install-venv/run.sh || fail=1
 
+echo "== tests/sdk-state/check.sh"
+bash tests/sdk-state/check.sh || fail=1
+
 echo "== tests/flutter-dart-symbols/run.sh"
 bash tests/flutter-dart-symbols/run.sh || fail=1
 

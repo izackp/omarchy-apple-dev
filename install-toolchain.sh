@@ -524,8 +524,10 @@ if [ "${1:-}" = "--repair" ]; then
   elif [ -n "${XCODE_XIP:-}" ] && [ -f "$XCODE_XIP" ]; then
     cached="XCODE_XIP=$XCODE_XIP"
     sdk_build_and_install "$XCODE_XIP"
+  elif [ -d "$SDK_SRC/Xcode.app" ]; then
+    sdk_build_and_install "$SDK_SRC/Xcode.app"
   else
-    echo "No usable cached SDK in $SDK_CACHE and no XCODE_XIP given."
+    echo "No usable cached SDK in $SDK_CACHE, no XCODE_XIP given, and no $SDK_SRC/Xcode.app."
     echo "Nothing to repair from. Either point XCODE_XIP at an Xcode $(matching_xcode) .xip,"
     echo "or run once with XCODE_XIP to build the cache for next time."
     exit 1

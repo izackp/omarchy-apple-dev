@@ -74,6 +74,8 @@ check_repair() {
   touch -d '2 hours ago' "$T/cm/darwin-iPhoneOS98.xtoolsdk"
   out=$(run "$b" "$T/cur" "$T/cm" no no 1); want "$l newest stale, older current: registers the older" "$out" "REGISTER darwin-iPhoneOS98" 1
   out=$(run "$b" "$T/cur" "$T/cs" yes no 1); want "$l cache stale+xip: rebuilt" "$out" "BUILD Xcode.xip" 1; want "$l cache stale+xip: not registered stale" "$out" "REGISTER darwin-iPhoneOS99" 0
+  out=$(run "$b" "$T/cur" "$T/cs" no yes 1); want "$l cache stale+Xcode.app: rebuilt" "$out" "BUILD Xcode.app" 1; want "$l cache stale+Xcode.app: not registered stale" "$out" "REGISTER darwin-iPhoneOS99" 0
+  out=$(run "$b" "$T/cur" "$T/cx" no yes 1); want "$l cache absent+Xcode.app: rebuilt" "$out" "BUILD Xcode.app" 1
 }
 check_step6 "$T/step6.sh" "step6"
 check_repair "$T/repair.sh" "repair"
