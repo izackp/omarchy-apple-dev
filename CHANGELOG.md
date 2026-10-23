@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### A stale Darwin SDK is rebuilt, not skipped
+
+- After the xtool pin moved to 1.23.0 (v0.4.1), a Darwin SDK built by the older xtool stayed registered, and `xtool dev` stopped with "Darwin SDK is out of date, and was installed in 'slim' mode" (reported on issue #78). `install-toolchain.sh` step 6 skipped the SDK whenever `swift sdk list` showed `darwin`, and `--repair` re-registered the cached bundle without looking at it.
+- Both now read the SDK stamp (`darwin-sdk-version.txt`) and compare it with `XTOOL_SDK_VERSION`, the stamp the pinned xtool writes. A stale SDK is rebuilt from `XCODE_XIP` or `~/xcode-apple-sdk-src/Xcode.app`. Without either, the script prints why and what to download, and exits 1. A stale cache is no longer re-registered by `--repair`.
+- `tests/sdk-state/check.sh` runs the real step 6 and `--repair` blocks against stubs, with two mutants, and with `XTOOL_SRC` set compares `XTOOL_SDK_VERSION` with the pinned xtool source. Not run: a full installer run on Arch, or an SDK rebuild from a real `.xip`.
+- When you move `XTOOL_SHA`, move `XTOOL_SDK_VERSION` with it. The test fails if they disagree and `XTOOL_SRC` is set.
+
 ## v0.4.1
 
 ### xtool 1.23.0 and the password login error

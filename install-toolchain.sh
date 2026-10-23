@@ -89,6 +89,7 @@ sdk_install_from() {
 }
 
 REPO_DIR=$(dirname "$(readlink -f "$0")")
+. "$REPO_DIR/tools/sdk-state.sh"
 # SwiftPM keeps Swift SDKs under $XDG_CONFIG_HOME/swiftpm when XDG_CONFIG_HOME is
 # set (it is in an Omarchy desktop terminal), else under ~/.swiftpm.
 DARWIN_SDK_BUNDLE="${XDG_CONFIG_HOME:+$XDG_CONFIG_HOME/swiftpm}"
@@ -112,6 +113,9 @@ fetch_commit() { # repo sha dir
 # ($ORIGIN only), so a toolchain swap or upgrade cannot break it.
 XTOOL_REPO=https://github.com/joshuaswarren/xtool
 XTOOL_SHA=f300489f3a3fddbd9fb598ba6cf69eb24a494527
+# The SDK stamp that pin writes (SDKBuilder.currentSDKVersion: epoch, darwin-tools and OpenAppleMacros
+# versions). Change it together with XTOOL_SHA; tests/sdk-state/check.sh compares it with the pinned source.
+XTOOL_SDK_VERSION="epoch=4,darwinTools=1.1.0,oam=1.4.1"
 install_xtool() {
   local src="$HOME/.cache/omarchy-apple-dev/xtool-$XTOOL_SHA"
   local dest="$HOME/.local/lib/omarchy-apple-dev/xtool-$XTOOL_SHA"
@@ -503,13 +507,19 @@ if [ "${1:-}" = "--repair" ]; then
   swift --version | head -n1
   toolchain_first_on_path
   cached=$(ls -dt "$SDK_CACHE"/darwin-*.xtoolsdk 2>/dev/null | head -n1 || true)
+  # A cache built by an older xtool would be registered and then refused by `xtool dev`.
+  if [ -n "$cached" ] && [ "$(sdk_state "$cached" "$XTOOL_SDK_VERSION")" = stale ]; then
+    sdk_stale_note "$(sdk_bundle_version "$cached")" "$XTOOL_SDK_VERSION"
+    echo "Not re-registering the cached bundle $cached"
+    cached=
+  fi
   if [ -n "$cached" ]; then
     sdk_install_from "$cached"
   elif [ -n "${XCODE_XIP:-}" ] && [ -f "$XCODE_XIP" ]; then
     cached="XCODE_XIP=$XCODE_XIP"
     sdk_build_and_install "$XCODE_XIP"
   else
-    echo "No cached SDK in $SDK_CACHE and no XCODE_XIP given."
+    echo "No usable cached SDK in $SDK_CACHE and no XCODE_XIP given."
     echo "Nothing to repair from. Either point XCODE_XIP at an Xcode $(matching_xcode) .xip,"
     echo "or run once with XCODE_XIP to build the cache for next time."
     exit 1
@@ -660,8 +670,16 @@ echo "== 6. Darwin SDK registration =="
 toolchain_first_on_path
 # Exact match: a broken bundle makes `swift sdk list` print a warning that also
 # contains "darwin" (darwin.artifactbundle).
+sdk_reg=none
 if swift sdk list 2>/dev/null | grep -qx darwin; then
-  echo "Darwin SDK already registered; skipping install."
+  sdk_reg=$(sdk_state "$DARWIN_SDK_BUNDLE" "$XTOOL_SDK_VERSION")
+fi
+# A registered SDK from an older xtool is not "done": xtool dev refuses it. Rebuild it below.
+if [ "$sdk_reg" = stale ]; then
+  sdk_stale_note "$(sdk_bundle_version "$DARWIN_SDK_BUNDLE")" "$XTOOL_SDK_VERSION"
+fi
+if [ "$sdk_reg" = current ]; then
+  echo "Darwin SDK already registered and current ($XTOOL_SDK_VERSION); skipping install."
 elif [ -n "${XCODE_XIP:-}" ] && [ -f "$XCODE_XIP" ]; then
   sdk_build_and_install "$XCODE_XIP"
 elif [ -d "$SDK_SRC/Xcode.app" ]; then

@@ -212,6 +212,8 @@ survive-status summary: SDK source used, pairing location, auth state. It
 exits nonzero with instructions when the cache is missing and no `XCODE_XIP`
 is given.
 
+An SDK built by an older xtool is out of date. xtool stamps each SDK it builds, and `xtool dev` refuses an SDK with a different stamp. The cached and registered SDKs are prebuilt bundles, which xtool treats as "slim" and cannot update in place. So when the xtool pin moves, both the default run and `--repair` compare the stamp with the one the pinned xtool writes. A stale SDK is not skipped and not re-registered. It is rebuilt from `XCODE_XIP` (or `~/xcode-apple-sdk-src/Xcode.app`), and the script stops with instructions if neither exists.
+
 `--repair` also checks the pymobiledevice3 venv in `~/pymobile3-venv`. When
 its packages no longer import, it removes the venv and rebuilds it against
 the interpreter on PATH. The venv is always created from the resolved
