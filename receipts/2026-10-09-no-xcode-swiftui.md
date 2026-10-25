@@ -15,7 +15,7 @@ for the iPhone (iOS 27.0.1).
   `SwiftUI symbols checked, missing 0`, `built .../HelloSwiftUI`.
 - The stubs for the check were cut with `ipsw dyld tbd` from the iOS 27.0.1
   dyld shared cache (iPhone16,2 build 24A446) extracted from Apple's public
-  IPSW to the QNAP (`dsc27/24A446__iPhone16,2/`): SwiftUI, SwiftUICore,
+  IPSW to a scratch cache (`dsc27/24A446__iPhone16,2/`): SwiftUI, SwiftUICore,
   Combine, CoreTransferable, DeveloperToolsSupport (+ CoreText, UIFoundation,
   AttributeGraph present in the sysroot).
 - `tools/macho-lint.py` on the signed IPA: `1/1 Mach-O images clean`

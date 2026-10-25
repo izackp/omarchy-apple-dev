@@ -22,7 +22,7 @@ compiled, linked, and signed, and a Mach-O lint passed, but no phone ran it. Rec
 | React Native third-party Fabric pods (`react-native-safe-area-context`) | no | no | same |
 | Setup without an iPhone (Apple's public iOS update) | yes: 22 stubs match the phone-cut ones byte for byte | same builds as above | `2026-10-09-phone-free-setup.md` |
 | Ubuntu 24.04 container | `setup.sh`, `build-stdlib.sh`, `swiftc.sh` pass | n/a | `docs/DISTROS.md` |
-| Ubuntu: overlays, Flutter build, full (Xcode) mode, aarch64, Fedora | not tested | n/a | `docs/DISTROS.md` |
+| Ubuntu x86_64: overlays, Flutter build and full (Xcode) mode; Ubuntu aarch64: full (Xcode) mode | not tested | n/a | `docs/DISTROS.md` |
 | Install with a free Apple ID in this mode | not checked | not checked | `sdk-free/README.md` |
 | App extensions, widgets, macOS apps | not supported | n/a | `sdk-free/README.md` |
 

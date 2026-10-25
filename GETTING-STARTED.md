@@ -56,9 +56,9 @@ xtool dev build
 ```
 
 The generator writes the xtool adapter next to the project. It prints one
-`warning:` line for each thing it cannot convert, for example storyboards
-(Linux has no Interface Builder compiler). Read those lines before you
-continue.
+`warning:` line for each thing it cannot convert. Interface Builder files the
+Linux `ibtool` compiles ship as normal resources; the rest are excluded with
+a warning that names them. Read those lines before you continue.
 
 To edit the code, open the folder of the `.xcodeproj` (or `omarchy-xtool`) in
 any editor with SourceKit-LSP, for example VS Code with the Swift extension or
@@ -132,13 +132,54 @@ ASC_ISSUER_ID=<issuer id> ASC_KEY_ID=XXXXXXXXXX BUNDLE_ID=com.example.MyMacApp \
   ~/.local/share/omarchy-apple-dev/ship-mac.sh --notarize
 ```
 
-It builds `build/MyMacApp.app`, signs it with your Developer ID Application
-certificate, and notarizes it, so it opens on any Mac. Only the Account Holder
-can create that certificate, in the developer portal: upload a CSR, and put the
-key and the certificate as `key.pem` and `cert.pem` in
+It builds `build/MyMacApp.app` for Apple Silicon, signs it with your Developer
+ID Application certificate, and notarizes it. Only the Account Holder can
+create that certificate in the developer portal: upload a CSR, and put the
+key and certificate as `key.pem` and `cert.pem` in
 `~/.config/omarchy-apple-dev/developer-id/`. Without `--notarize` and without
-the certificate, the app is signed ad hoc and opens only on your own Macs.
+the certificate, the app is signed ad hoc and is not notarized for distribution.
 FINDINGS.md item 57 has the details.
+
+## Toolchain swaps (mise, asdf, manual)
+
+A toolchain swap changes Swift's path. Pairing, auth and the SDK cache are
+stored outside that toolchain: USB pairing in `~/.pymobiledevice3/` (plus
+`/var/lib/lockdown` records), Apple ID auth in `~/.local/share/xtool/`, and
+the SDK in `~/.cache/xtool/darwin-iPhoneOS<ver>.xtoolsdk`. Re-register a
+current SDK cache into the new toolchain:
+
+```
+~/.local/share/omarchy-apple-dev/install-toolchain.sh --repair
+```
+
+`--repair` re-registers a current cached SDK without an `.xip` and prints
+SDK, pairing and auth status. Missing tools or dependencies may be downloaded.
+It exits nonzero with instructions when the cache is missing and no `XCODE_XIP`
+is given. An SDK built by an older xtool is stale (xtool stamps each SDK it
+builds, and `xtool dev` refuses a different stamp), so it is rebuilt from
+`XCODE_XIP` or `~/xcode-apple-sdk-src/Xcode.app`, not re-registered; the
+script stops with instructions if neither exists. `--repair` also rebuilds the
+pymobiledevice3 venv in `~/pymobile3-venv` when its packages no longer import.
+
+On mise specifically: `mise install swift` needs the curses compat shim on
+Arch. Its two swift-backend URL bugs are fixed on mise main
+([#13293](https://github.com/jdx/mise/pull/13293),
+[#13297](https://github.com/jdx/mise/pull/13297)) but not in a tagged release
+as of 2026-09-17:
+
+```
+~/.local/share/omarchy-apple-dev/install-toolchain.sh --curses-compat
+export LD_LIBRARY_PATH=~/.local/lib/curses-narrow-compat
+mise install swift@<version>
+```
+
+`--curses-compat` aliases every narrow curses soname the host is missing to
+its wide twin inside `~/.local/lib/curses-narrow-compat` (nothing under
+`/usr/lib` is touched) and prints the export line, which has to be set in the
+shell that runs mise; mise's own `[env]` never reaches its post-extract
+`swift --version` check. Pass an extracted toolchain directory to have it
+verify that every soname resolves. This repo's own route, AUR `swift-bin`,
+needs none of this.
 
 ## If something fails
 

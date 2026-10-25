@@ -26,21 +26,19 @@ App Store Connect TestFlight with `processingState VALID`:
   CFBundleVersion 202610092142; LC_BUILD_VERSION sdk of every Mach-O (Runner,
   Flutter, App — 3 files) raised from the link's 26.0 to 27.0 (ITMS-90725).
 - `asc.py identity`: the existing Apple Distribution certificate
-  (`Apple Distribution: Creatuity Corp. (9LX44YXXVX)`), a new IOS_APP_STORE profile
+  (the test team's Apple Distribution identity), a new IOS_APP_STORE profile
   for the bundle id (`052868ab-…`, expires 2027-10-04), embedded.mobileprovision,
   get-task-allow false.
 - rcodesign inside-out (Frameworks, then the app), package, offline validate, upload.
 - ASC's own banner on 2026-10-09 requires an iOS 27.1 SDK only for a screenshots rule
   starting April 2027, so 27.0 remains accepted (same day IceCubes shipped VALID on it).
 
-## App Store Connect setup (portal work, macstudio runbook)
+## App Store Connect setup
 
 - Bundle id registered through the API (`POST /v1/bundleIds`, id `5P874NK37D`).
-- The app record was created through the ASC web UI on Joshua's main Helium (raw CDP
-  50293; the API refuses app records): Apps → New App → "Omarchy NoSDK Counter",
-  English (U.S.), the registered bundle id, SKU, iOS platform, Full Access → Create.
-  Record `6821068345`. The sign-in had expired and was renewed through Helium's
-  iCloud Passwords autofill (runbook section 2); no 2FA prompt was needed.
+- The app record was created through the ASC web UI (the API refuses app records):
+  Apps > New App, then the app name, language, registered bundle ID, SKU,
+  iOS platform and access setting. Create the record before uploading.
 
 ## The processing wedge, and the fix (measured)
 
@@ -76,14 +74,8 @@ The shipped counter used: catalog with one `AppIcon.appiconset` entry
 
 ## Build inputs
 
-- Build (chroot, archrun-n.sh, builder user): `sdk-free/flutter-build.sh` release on
-  `/qwork/nosdk-ship/sdkfree-counter`, env `SDKFREE_HOME=/qwork/sdkfree-swift`,
-  `SDKFREE_TBD_DIR=/qwork/tbd27`, `BUNDLE_ID=com.joshuawarren.omarchyappledev.nosdkcounter`;
+- Build in an Arch chroot as a non-root user: `sdk-free/flutter-build.sh` release on
+  `$WORK/nosdk-ship/sdkfree-counter`, env `SDKFREE_HOME=$WORK/sdkfree-swift`,
+  `SDKFREE_TBD_DIR=$WORK/tbd27`, `BUNDLE_ID=com.joshuawarren.omarchyappledev.nosdkcounter`;
   first build 204 s, fixed rebuild 378 s. `Runner-store.ipa` 6.76 MB (6,762,980 bytes
   uploaded in 2 parts).
-- The QNAP original `apps/sdkfree-counter` build output (bundle id
-  `dev.omarchy.sdkfree.counter`) is untouched; ships ran on copies under
-  `flutter-work/nosdk-*`. Probe leftovers for the lead to delete when convenient:
-  `flutter-work/nosdk-ship-demo`, `flutter-work/nosdk-probe1`, `flutter-work/probe1`
-  (not mine), `flutter-work/nosdk-probe3`, `flutter-work/cmp-tf` (the stuck test
-  uploads stay in ASC as PROCESSING; Apple clears them on their own schedule).

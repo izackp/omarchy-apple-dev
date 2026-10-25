@@ -266,7 +266,7 @@ rolls back — likely a shared-library mismatch in the ubuntu build. Filed upstr
 https://github.com/jdx/mise/discussions/13289 (fabricated names, ID_LIKE ignored)
 and /13291 (arm64 directory suffix).
 
-**Update 2026-09-17, retest on jwm1 (Omarchy 4.0.1rc2 aarch64).** jdx
+**Update 2026-09-17, retest on an M1 Mac (Omarchy 4.0.1rc2 aarch64).** jdx
 merged [#13293](https://github.com/jdx/mise/pull/13293) (directory suffix)
 and [#13297](https://github.com/jdx/mise/pull/13297) (release-index +
 `ID_LIKE` + UBI fallback). Neither is in a tagged release yet: latest tag
@@ -292,7 +292,7 @@ narrow-vs-wide ncurses naming split, not a mise bug — and it is
 solvable; see item 21.
 
 **21. mise CAN install and run Swift on Omarchy: the ubi9 build needs three
-narrow curses sonames Arch does not ship (proven 2026-09-17, jwm1).**
+narrow curses sonames Arch does not ship (proven 2026-09-17 on an M1 Mac).**
 
 Every missing soname in the whole ubi9 6.3.3 toolchain, found by `ldd`-ing
 all of `usr/bin` and `usr/lib/*.so*`:
@@ -364,7 +364,7 @@ Rocky/Alma 9 `python3-libs` rpm if absent.
 
 
 Residual risk, closed 2026-09-18: the curses TUI itself was the remaining
-unknown and it PASSES. On jw16 (M1 Max, Omarchy arm64) the ubi9 lldb ran
+unknown and it PASSES. On a 16-inch M1 Max MacBook Pro (Omarchy arm64) the ubi9 lldb ran
 `gui` under the aliases: full chrome rendered (menu bar, Sources/Threads
 panes), F1 opened the dropdown menu, arrow+Enter selection worked, and
 Exit returned cleanly to the `(lldb)` prompt. Draw, input, and teardown
@@ -682,7 +682,7 @@ generator. It stops at three platform walls, in build order:
 
 ## aarch64 parity, 2026-10-04
 
-**28. The same no-sudo path works on aarch64 Omarchy.** On jwm1 (M1), as a new
+**28. The same no-sudo path works on aarch64 Omarchy.** On an M1 Mac, as a new
 user with no sudo and the swift.org `swift-6.4.0-RELEASE-ubi10-aarch64` tarball:
 `install-toolchain.sh --user-only` exits 0 (SDK, actool, xcstringstool, the
 OpenAppleMacros build), the template builds to `Mach-O 64-bit arm64`, an app with
@@ -801,7 +801,7 @@ and the `MastodonSDKDynamic` dylib. Xcode allows that; SwiftPM does not.
 ## First App Store upload, 2026-10-04
 
 **33. App Store Connect accepts the upload from Linux and then validates it;
-two Apple checks failed.** With a real API key (team Creatuity Corp.), `ship.sh
+two Apple checks failed.** With a real API key for the test team, `ship.sh
 --upload` created an Apple Distribution certificate and an App Store profile,
 signed the demo app, passed the offline checks and uploaded it through the
 build-upload API (no Transporter, no Mac). Apple's processing then returned:
@@ -820,7 +820,7 @@ Nothing was submitted for review.
 ## aarch64, full pipeline, 2026-10-04
 
 **34. On aarch64 the installer builds the fixed xtool and the macro server,
-and NetNewsWire ships with its extensions.** jwm1 (M1), a new user with no
+and NetNewsWire ships with its extensions.** On an M1 Mac, a new user with no
 sudo, the swift.org `swift-6.4.0-RELEASE-ubi10-aarch64` tarball, repo at
 c7216e9: `install-toolchain.sh --user-only` exits 0 (xtool 3cbf66b with
 RUNPATH `[$ORIGIN]`, OpenAppleMacros cb003a1); the template builds to
@@ -1305,7 +1305,7 @@ App Store Connect API key and staples the ticket. On a Mac, `spctl` says
 
 **59. AssetKit now writes Apple's one-atlas-per-scale layout; IceCubes'
 merged car still has a processing stall being separated.** The probe (actool
-27.0 on macstudio, IceCubes' 2-set catalog and NNW's 2-set `two.xcassets`):
+27.0 on a Mac, IceCubes' 2-set catalog and NNW's 2-set `two.xcassets`):
 Apple packs every symbol set of a catalog into ONE
 `ZZZZPackedAsset-<scale>.0.1-gamut0` per scale (keys element 9/part 181/
 identifier 0, never colliding), cached renditions sit at element 85 with
@@ -1422,11 +1422,11 @@ production even for Developer ID direct distribution; ICLOUD needs
 capabilitySettings `[{"key": "ICLOUD_VERSION", "options": [{"key":
 "XCODE_6"}]}]` because the bare create fails with "cannot have the CloudkitVersion
 'null'"; APP_GROUPS takes no group list and the profile grants only
-"9LX44YXXVX.*"-shaped names, so NetNewsWire's `group.com.ranchero.NetNewsWire-Evergreen`
+"<team-id>.*"-shaped names, so NetNewsWire's `group.com.ranchero.NetNewsWire-Evergreen`
 cannot be backed (no source reads the group — dropped); iCloud containers
 cannot be attached at all (the profile's icloud-container-identifiers is
 empty), so the icloud keys ship dropped; the kvstore identifier
-`9LX44YXXVX.com.ranchero.NetNewsWire` matches the team wildcard and ships.
+`<team-id>.com.ranchero.NetNewsWire` matches the team wildcard and ships.
 The app id itself cannot be `com.ranchero.NetNewsWire-Evergreen` — explicit
 App IDs are globally unique and Ranchero owns it (409 "not available") — so
 the adapter ships under the team's ids
@@ -1436,7 +1436,7 @@ build/<product>.entitlements, so a provisioning run that reads that path after
 a ship sees the trimmed set and "backs everything" vacuously; and an app that
 claims a key its embedded profile lacks is refused by launchd at spawn
 (RBSRequestErrorDomain Code=5, POSIX 163) — regenerate build/provision/ from
-the claims file, then ship. Final state on macstudio (M1 Max, macOS 26.6.2):
+the claims file, then ship. Final state on an M1 Max Mac (macOS 26.6.2):
 spctl "accepted, source=Notarized Developer ID", the app runs to its
 three-pane main window (Smart Feeds with unread counts, ten real feeds with
 favicons — the sandboxed network path works), Sparkle's first-run sheet shows
@@ -1493,7 +1493,7 @@ processing — the App Store path is untouched. With a team id the mode fills th
 team prefix first; without one it fails closed: the device path runs asc.py's
 surviving-placeholder FAIL on the .app as its final step, and on the un-teamed
 NNW run it exited 1 naming `Info.plist:AppIdentifierPrefix` in the app and both
-appexes, then passed after `--device 9LX44YXXVX` filled them. Layout proof
+appexes, then passed after `--device <team-id>` filled them. Layout proof
 against the TestFlight builds: NNW's root gained 28 entries (eight themes, four
 RTF, four keyboard-shortcut plists, ContentRules.json, DefaultFeeds.opml,
 PrivacyInfo.xcprivacy, the article js/css/html, en.lproj) and IceCubes's 141

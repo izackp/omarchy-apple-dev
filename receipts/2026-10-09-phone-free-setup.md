@@ -1,6 +1,6 @@
 # Phone-free setup (stubs from Apple's public iOS update)
 
-Date: 2026-10-09. Branch: `phone-free-setup`.
+Date: 2026-10-09. `$WORK` below denotes the scratch directory used for this test.
 
 `sdk-free/setup.sh` no longer needs a connected iPhone. New source choice: phone (default when one is
 connected) or `--ipsw` / `SDKFREE_IPSW=auto|<build>` (`--build <build>` pins, `--device <model>` /
@@ -14,10 +14,10 @@ Why `extract --remote` and not `download ipsw --dyld`: on Linux both end in the 
 (download the system image, mount it with apfs-fuse), but `extract --remote` downloads only the
 2.4 GB `.dmg.aea` of the system image instead of the IPSW feeds' full file set, and the
 `download ipsw --dyld` run on this host failed before the mount step
-(`/mnt/qnap-public/.../dsc27/dl.log`: "failed to find apfs-fuse"). The `extract --remote` run is the
+with "failed to find apfs-fuse". The `extract --remote` run is the
 one that produced the cache below.
 
-apfs-fuse is provisioned by setup.sh itself (lead decision 2026-10-09): pinned commit
+apfs-fuse is provisioned by setup.sh itself: pinned commit
 `66b86bd525e8cb90f9012543be89b1f092b75cf3` of github.com/sgan81/apfs-fuse (submodule lzfse included),
 built with `cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_FLAGS="-include cstdint"` — the
 policy flag for CMake >= 4, the cstdint force-include because GCC 15 no longer leaks `uint32_t`
@@ -28,12 +28,12 @@ policy flag for CMake >= 4, the cstdint force-include because GCC 15 no longer l
 ## Cache and stub equivalence (iPhone16,2, build 24A446 = iOS 27.0.1)
 
 Cache source: Apple public IPSW `iPhone16,2_27.0.1_24A446_Restore.ipsw`, extracted to
-`/mnt/qnap-public/omp-studio-offload/apple-dev/flutter-work/dsc27/24A446__iPhone16,2/`
+`$WORK/dsc27/24A446__iPhone16,2/`
 (dyld_shared_cache_arm64e + 77 subcaches, ~4.6 GB). Reference stubs cut from the connected phone:
-`flutter-work/tbd27/` (27 files).
+`$WORK/tbd27/` (27 files).
 
 sha256 of all 27 stubs, ipsw-cut vs phone-cut (full table in
-`/qwork/sdkfree-ipsw/stub-compare.txt`):
+`$WORK/sdkfree-ipsw/stub-compare.txt`):
 
 - 26 of 27 byte-identical, including install-name, current-version and the full export list:
   CoreFoundation, CoreGraphics, Foundation, QuartzCore, SafariServices, libSystem.B.dylib,
@@ -56,7 +56,7 @@ contains all of them and they cut byte-identical, so widening the IMAGES list la
 
 ## Chroot run (no phone, no Xcode)
 
-`SDKFREE_HOME=/qwork/sdkfree-ipsw`, no phone in the chroot, cache fed with `SDKFREE_DSC_DIR=/qwork/dsc27`,
+`SDKFREE_HOME=$WORK/sdkfree-ipsw`, no phone in the chroot, cache fed with `SDKFREE_DSC_DIR=$WORK/dsc27`,
 build pinned with `SDKFREE_IPSW=24A446`. setup.sh skipped the download (cache present), resolved the build to
 iOS 27.0.1 (24A446), wrote `SystemVersion.plist` (`ProductVersion` 27.0.1, `ProductBuildVersion` 24A446) and
 assembled the sysroot (11 MB).
@@ -68,22 +68,15 @@ unique-symbol difference) shows up only with the older ipsw 3.1.724 that happene
 tool-version difference, not a cache difference. The five stubs outside the IMAGES list
 (SafariServices, libswiftCoreImage, libswiftXPC, libswiftos, libswiftsimd) cut byte-identical from the
 same cache; SafariServices is already shipped as an authored stub in `sdk-free/headers`.
-Full per-file table: `/qwork/sdkfree-ipsw/stub-compare.txt`.
+Full per-file table: `$WORK/sdkfree-ipsw/stub-compare.txt`.
 
 Swift pipeline: `build-stdlib.sh` rebuilt the standard library res for the unchanged compiler
 (swift-6.4-RELEASE), `overlays.sh` rebuilt the framework overlays against the new sysroot —
 `$SDKFREE_HOME/swift/res/iphoneos` carries Swift, SwiftOnoneSupport, _Concurrency, ObjectiveC, Darwin,
 Dispatch, CoreGraphics and Foundation modules.
 
-Flutter counter (`sdk-free/flutter-build.sh /qwork/apps/sdkfree-counter`): built
-`/qwork/apps/sdkfree-counter/build/ios-sdkfree/release/Runner-unsigned.ipa`
+Flutter counter (`sdk-free/flutter-build.sh "$WORK/apps/sdkfree-counter"`): built
+`$WORK/apps/sdkfree-counter/build/ios-sdkfree/release/Runner-unsigned.ipa`
 (`dev.omarchy.sdkfree.counter`, release, iOS 15.0+, 6.75 MB). Full log:
-`/qwork/sdkfree-ipsw/test-run.log`.
+`$WORK/sdkfree-ipsw/test-run.log`.
 
-## Leftovers for the lead
-
-- Stale partial downloads under `dsc27/tmp/` (8.1 GB): `ipsw_extract_remote_dyld3416692060` (632 MB),
-  `ipsw_extract_remote_dyld4019844049` (7.4 GB), `ipsw_extract_remote_dyld4117068924` (120 MB). Deletion is
-  blocked by the shell guards on this container; paths listed per the guard rule.
-- The successful extraction's `dyld_shared_cache_arm64e.symbols` (1.2 GB) sits next to the cache in
-  `dsc27/24A446__iPhone16,2/`; the cache itself (~4.6 GB) stays for SwiftUIPlan until the lead retires it.

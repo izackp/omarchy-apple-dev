@@ -165,7 +165,7 @@ The `No pacman` message is expected. No manual ncurses compatibility shim
 was required for **installation on this host**, but LLDB still reported a
 missing `libpython3.9.so.1.0` and was not tested.
 
-**Current deployment workaround:** the installer pins a patched xtool at
+**Deployment workaround used in this 2026-10-20 run:** the installer then pinned a patched xtool at
 `f0a1f90efdbb0dc023e276ff529da92618da7a87`; it compiled SwiftUI but
 Apple ID authentication failed with `-80045`. Upstream xtool's newer `aa6ba75e7df759a84560885a86822dd119da8c55`
 authenticated successfully after a separate source build:

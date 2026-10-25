@@ -1,139 +1,70 @@
 # Build and deploy iOS apps on Omarchy Linux (Apple Silicon and x86_64)
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink)](https://github.com/sponsors/joshuaswarren)
+SwiftUI and Flutter apps built on Omarchy Linux and installed on a physical
+iPhone: over USB, or over your tailnet on iOS 27. No Xcode and no macOS in
+the loop. A free Apple ID covers device installs; a paid developer account
+adds TestFlight and the App Store.
 
-SwiftUI and Flutter apps built on Omarchy Linux, installed on a physical iPhone
-over USB. No Xcode and no macOS in the loop.
+## What was verified, and when
 
-Any PC that runs Omarchy works. Use an x86_64 laptop or desktop, or an Apple
-Silicon Mac.
-
-The current working set was verified on 2026-10-03 on x86_64 Arch with the
-install script as a fresh user (FINDINGS.md item 22).
+| Date | What ran | Evidence |
+|------|----------|----------|
+| 2026-10-03 | Fresh-user install on x86_64 Arch: Swift 6.4.0, xtool 1.20.1, Xcode 27.0 SDK | [FINDINGS.md](FINDINGS.md) item 22, [receipt](receipts/2026-10-03-xtool-1.20-swift-6.4-x86_64.md) |
+| 2026-10-23 | xtool 1.23.0 with made-up credentials: password auth changed from -80045 to Apple's invalid-credential -20970. No real-Apple-ID sign-in, SDK build, device install or LLDB loop on this version | [receipt](receipts/2026-10-23-xtool-1.23.0-auth.md) |
+| 2026-10-25 | Fresh x86_64 Arch install through the SDK-download step, plus interrupted-xtool-install repair with Swift 6.4.1. No SDK build, device install or LLDB loop | [CHANGELOG.md](CHANGELOG.md), *xtool installs again on a fresh machine* |
+| 2026-09-09 | Device install and the LLDB loop on an M1, with Swift 6.3.3, xtool 1.19.0 and the iOS 26.5 SDK. Not re-run on the 6.4 set | [FINDINGS.md](FINDINGS.md), *Working sequence* |
+| 2026-09-15 | x86_64 flow confirmed by a community report (Jon Kinney); the same flow runs a real client project on a Framework Desktop with an iPhone 16 | none |
 
 | Tool | Version | Source |
 |------|---------|--------|
-| Swift | 6.4.0 | AUR `swift-bin` |
-| xtool | 1.23.0 + 10 commits (xtool-org/xtool#290-#293, #295, #302, still open upstream) | built from source by the installer |
+| Swift | 6.4.1 in the latest fresh-install check | AUR `swift-bin` |
+| xtool | 1.23.0 + 10 fixes (fork pin `f300489`; xtool-org/xtool #290-#293, #295, #302 still open upstream) | built from source by the installer |
 | pymobiledevice3 | latest from PyPI at install time | venv |
-| LLDB | 21.0.0 (Swift toolchain) | bundled with `swift-bin` |
-| iOS SDK | iPhoneOS 27.0 | Xcode 27.0 (full mode); in no-Xcode mode, link stubs cut from Apple's public iOS update |
-
-The xtool row changed on 2026-10-23, after the rest of the table was verified
-(on 1.20.1). xtool 1.22.2 and later fix `xtool auth` in password mode failing
-with -80045 (xtool-org/xtool#329, fixed by #337). The 1.23.0 pin builds with
-Swift 6.4.0 on x86_64 Debian 12 (libimobiledevice 1.4.0 built from source), and
-`xtool auth` with a made-up Apple ID now ends in "Your account information was
-entered incorrectly. (-20970)". The SDK build, device install and LLDB loop have
-not been re-run on 1.23.0, and the installer has not been re-run as a fresh Arch
-user on it.
-
-The device install and the LLDB loop were proven on 2026-09-09 on an M1. That
-run used Swift 6.3.3, xtool 1.19.0 and the iOS 26.5 SDK. It has not been re-run
-on the 6.4 set. Jon Kinney confirmed the x86_64 flow in a community report on
-2026-09-15. The same flow works on a Framework Desktop with an iPhone 16, used
-for a real client project.
-
-Works with a free Apple ID. Paid membership not required for device installs.
-
-## Flutter apps
-
-Build a Flutter app on Linux and end with a signed development `.ipa` for an
-iPhone. The build is release mode, arm64. It is verified on x86_64 with Flutter
-3.47.6 (receipts: `receipts/2026-10-08-flutter-signed-ipa.md`).
-
-```
-./install-toolchain.sh                    # once, as for any app in this repo
-sudo pacman -S --needed llvm rsync        # the two tools the Flutter build calls
-flutter/setup.sh                          # once per Flutter version: about 5 minutes
-
-flutter create --platforms ios counter    # or use your own Flutter app
-flutter/build.sh counter                  # 29 s for the counter template
-                                          # -> counter/build/ios-linux/Runner.ipa (unsigned)
-
-# Sign it with a development profile for your device (App Store Connect API key;
-# see GETTING-STARTED.md), then install:
-tools/provision-dev.py --bundle-id dev.omarchy.flutterdemo.counter
-tools/sign-dev.sh counter/build/ios-linux/Payload/Runner.app Runner-dev.ipa
-
-# Or sign it for the App Store, validate offline, and upload (same variables as
-# ship.sh --upload below):
-flutter/ship.sh --upload counter          # -> counter/build/ios-linux/Runner-store.ipa
-```
-
-On a free Apple ID you can skip the signing step. Run
-`flutter/build.sh --install counter` instead. `xtool install` signs the app
-and puts it on the phone.
-
-- `build.sh` produces `Runner.ipa` (unsigned). `sign-dev.sh` produces
-  `Runner-dev.ipa`, development-signed, 6 MB for the counter template.
-  `tools/asc.py validate` passes 47 of 50 checks on it. The three that fail are
-  the App Store-only ones. `tools/macho-lint.py` reports every Mach-O image clean.
-- You need Flutter 3.47.x on `PATH` and the iPhoneOS SDK from the normal
-  install. The one-time setup needs about 7 GB of disk. It builds the iOS
-  `gen_snapshot` that Flutter ships only for macOS.
-- Setup took 5 min 23 s on a 16-core x86_64 machine. A laptop took about 12
-  minutes for setup. The counter template builds in 29 s with one plugin.
-- Release builds only. There is no debug, hot reload or simulator support.
-  Plugins must ship a `Package.swift`. aarch64 hosts are untested. Details:
-  [flutter/README.md](flutter/README.md).
-
-Flutter support is the work of [dl-alexandre](https://github.com/dl-alexandre)
-(@agrxculture). Thank you for the build pipeline
-([#7](https://github.com/joshuaswarren/omarchy-apple-dev/pull/7)), the Linux
-`ibtool` for Flutter's storyboards
-([#8](https://github.com/joshuaswarren/omarchy-apple-dev/pull/8)) and plugin
-package support ([#9](https://github.com/joshuaswarren/omarchy-apple-dev/pull/9)).
+| LLDB | bundled with the installed Swift toolchain | `swift-bin` |
+| iOS SDK | iPhoneOS 27.0 | Xcode 27.0 (full mode); in no-Xcode mode, link stubs cut from a connected iPhone or Apple's public iOS update |
 
 ## Two install modes
 
 `./install-toolchain.sh` asks which mode to use when it runs in a terminal.
-Pass `--mode full` or `--mode no-xcode` to skip the question. The last choice
-is remembered in `~/.config/omarchy-apple-dev/mode`. Without a terminal and
+Pass `--mode full` or `--mode no-xcode` to skip the question; the choice is
+remembered in `~/.config/omarchy-apple-dev/mode`. Without a terminal and
 without a choice it uses `full`.
 
 | | **full** (Xcode download) | **no Xcode download** (experimental) |
 |---|---|---|
 | Languages | Swift, SwiftUI, Objective-C, C, C++ | Objective-C, C and Swift (standard library, async/await, Foundation), plus a small SwiftUI subset (`App`, `WindowGroup`, `Text`, `VStack`, `Button`, `@State`) |
 | Flutter | release builds, any plugin whose source builds | release builds with Objective-C plugins and the Swift plugins `shared_preferences` and `url_launcher` |
-| System frameworks | everything in the Xcode SDK | a short list (Foundation, UIKit, CoreGraphics, QuartzCore, CoreFoundation, UserNotifications, libc), growing |
+| System frameworks | everything in the Xcode SDK | Foundation, UIKit, CoreGraphics, QuartzCore, CoreFoundation, UserNotifications, libc; a short list, growing |
 | Extensions, widgets, macOS apps | yes | not yet |
 | TestFlight and App Store | yes, with a paid account | TestFlight upload of Flutter apps, with a paid account (`sdk-free/ship.sh --upload`); App Store review not tried |
-| Needs | the Xcode archive from Apple (about 3 GB of it is used) | an iPhone only to run the apps; setup needs no phone (it reads a connected iPhone or Apple's public iOS update download) and uses about 7 GB of temporary disk |
+| Needs | the Xcode archive from Apple (about 3 GB of it is used) | an iPhone only to run the apps; setup reads a connected iPhone or Apple's public iOS update download and uses about 7 GB of temporary disk |
 
-Details of the second mode are in [sdk-free/README.md](sdk-free/README.md).
-What has run on an iPhone and what only builds is in
-[docs/TEST-MATRIX.md](docs/TEST-MATRIX.md).
+What has run on an iPhone and what only builds (no-Xcode mode):
+[docs/TEST-MATRIX.md](docs/TEST-MATRIX.md). Mode internals:
+[sdk-free/README.md](sdk-free/README.md).
 
-## What you need (full mode)
+## Requirements
 
-No Xcode download is needed in no-Xcode mode. Use `--mode no-xcode` and skip this section. That mode needs a Linux box,
-an iPhone to run the apps, an Apple ID for signing, and about 7 GB of temporary disk during setup. The table above has
-the details.
+- Omarchy or another Arch-based Linux on Apple Silicon or x86_64. Other
+  distributions: Ubuntu 24.04 and Fedora 44 have verified runs, NixOS a
+  reported one. See [docs/DISTROS.md](docs/DISTROS.md).
+- An iPhone and a USB data cable.
+- A free Apple ID for **one download from Apple**: the `Xcode.xip` from
+  developer.apple.com (full mode). The download works from any OS; no Mac, no
+  macOS and no Xcode install anywhere. The iOS SDK artifacts exist only inside
+  Apple's Xcode distribution, so this one download cannot be automated away.
+- For TestFlight and App Store: a paid developer account.
 
-For full mode:
-
-- An Apple Silicon or x86_64 Linux box running Omarchy (Arch-based). Both
-  architectures are covered. AUR `swift-bin` ships aarch64 and x86_64, and the
-  installer builds xtool from source on either. Other distributions can work:
-  see [docs/DISTROS.md](docs/DISTROS.md) (Ubuntu 24.04 tested in a container).
-- An iOS device and a USB cable.
-- An Apple ID (free) for **one download from Apple**. That download is the
-  `Xcode.xip` from developer.apple.com. The download works from any OS. You
-  need no Mac, no macOS install and no Xcode install anywhere. The iOS SDK
-  artifacts exist only inside Apple's Xcode distribution. This one download is
-  the only external requirement that cannot be automated away.
-
-Version matching matters. The SDK pieces must come from an Xcode whose Swift
-matches the installed `swift-bin`. Use **Xcode 27 for swift-bin 6.4** (the
-current AUR version) and Xcode 26 for 6.3 (FINDINGS.md items 16 and 22). The
-install script prints the matching Xcode when it stops at the SDK step.
+Version matching matters. The SDK must come from an Xcode whose Swift matches
+the installed `swift-bin`: **Xcode 27 for swift-bin 6.4**, Xcode 26 for 6.3
+(FINDINGS.md items 16 and 22). The installer prints the matching Xcode when it
+stops at the SDK step.
 
 ## Install
 
 New here? [GETTING-STARTED.md](GETTING-STARTED.md) walks from the Omarchy
-Install menu to a TestFlight upload. On Omarchy, **Install > Development > iOS**
-runs the steps below for you.
+Install menu to a TestFlight upload. On Omarchy, **Install > Development >
+iOS** runs these steps for you.
 
 ```
 git clone https://github.com/joshuaswarren/omarchy-apple-dev
@@ -141,84 +72,25 @@ cd omarchy-apple-dev
 ./install-toolchain.sh
 ```
 
-The script installs the toolchain. It puts the toolchain's own clang first on
-PATH for the SDK install. It tells you exactly what is left if anything is.
-Safe to re-run. When it stops at the SDK step, download the matching
-`Xcode .xip` from https://developer.apple.com/download/all/?q=Xcode and re-run:
+The script installs Swift and builds xtool, then stops at the SDK step and
+names the Xcode to download. Download that `.xip` from
+<https://developer.apple.com/download/all/?q=Xcode> and re-run:
 
 ```
 XCODE_XIP=/path/to/Xcode.xip ./install-toolchain.sh
 ```
 
-Verify with `swift sdk list` (should print `darwin`).
+`swift sdk list` should print `darwin` when the SDK is registered. Re-run the
+installer after toolchain changes: it checks the SDK stamp, not just that name.
 
-A `.xip` install also records the Xcode version and build, which `ship.sh` stamps as
-`DTXcode` and `DTXcodeBuild`. If the script cannot read them from the `.xip`, `ship.sh` asks for
-`XCODE_VERSION` and `XCODE_BUILD` as before.
-
-Already have a Mac with a matching Xcode? You can stream just the ~3 GB of
-SDK pieces xtool needs instead of the full .xip. Route B in
-`install-toolchain.sh` section 5 does this. It is optional; the .xip route
-above needs no Mac.
-
-## Toolchain swaps (mise/asdf/manual)
-
-Note on mise. Its two swift-backend URL bugs are fixed on mise main
-([#13293](https://github.com/jdx/mise/pull/13293),
-[#13297](https://github.com/jdx/mise/pull/13297)) but not in a tagged
-release as of 2026-09-17. On a build past those, `mise install swift`
-does work on Omarchy once you supply three curses sonames Arch names
-differently (FINDINGS 21):
-
-```
-./install-toolchain.sh --curses-compat
-export LD_LIBRARY_PATH=~/.local/lib/curses-narrow-compat
-mise install swift@6.3.3
-```
-
-`--curses-compat` aliases every narrow curses soname the host is missing to
-its wide twin inside `~/.local/lib/curses-narrow-compat` (nothing under
-`/usr/lib` is touched) and prints the export line. Pass an extracted
-toolchain directory to have it verify that every soname resolves:
-`./install-toolchain.sh --curses-compat /path/to/swift-6.3.3-RELEASE-ubi9-aarch64`.
-The variable has to be in the shell. The export line `--curses-compat`
-prints is the only route this repo provides. mise's own `[env]` never
-reaches its post-extract `swift --version` check.
-
-This repo still installs AUR `swift-bin`. That resolves the same thing at
-package level and needs no shim.
-
-A toolchain swap moves Swift to a different absolute path. That covers
-`mise use -g swift@<ver>`, an asdf switch, or a
-manual reinstall. It does not touch what you actually paid for. USB pairing
-records, your Apple ID auth, and the SDK cache all live in user-global paths
-and survive by design.
-
-What survives a swap:
-
-- USB pairing lives in `~/.pymobiledevice3/` (plus `/var/lib/lockdown` records).
-- Apple ID auth lives in `~/.local/share/xtool/`.
-- The SDK cache lives in `~/.cache/xtool/darwin-iPhoneOS<ver>.xtoolsdk`, kept
-  by the install script. The SDK bundle references the toolchain that
-  registered it. After a swap it must be re-registered into the current
-  toolchain:
-
-```
-./install-toolchain.sh --repair
-```
-
-`--repair` re-registers the cached SDK (no `.xip`, no network). It prints a
-survive-status summary: SDK source used, pairing location, auth state. It
-exits nonzero with instructions when the cache is missing and no `XCODE_XIP`
-is given.
-
-An SDK built by an older xtool is out of date. xtool stamps each SDK it builds, and `xtool dev` refuses an SDK with a different stamp. The cached and registered SDKs are prebuilt bundles, which xtool treats as "slim" and cannot update in place. So when the xtool pin moves, both the default run and `--repair` compare the stamp with the one the pinned xtool writes. A stale SDK is not skipped and not re-registered. It is rebuilt from `XCODE_XIP` (or `~/xcode-apple-sdk-src/Xcode.app`), and the script stops with instructions if neither exists.
-
-`--repair` also checks the pymobiledevice3 venv in `~/pymobile3-venv`. When
-its packages no longer import, it removes the venv and rebuilds it against
-the interpreter on PATH. The venv is always created from the resolved
-interpreter path, never from the `latest` symlink, so a toolchain move cannot
-strand the installed packages.
+- No sudo? `./install-toolchain.sh --user-only` with a swift.org toolchain on
+  PATH.
+- Already have a Mac with a matching Xcode? Route B in `install-toolchain.sh`
+  step 5 copies just the ~3 GB of SDK pieces instead of the whole `.xip`.
+  Optional; the `.xip` route needs no Mac.
+- After a Swift toolchain swap (mise/asdf/manual), run
+  `./install-toolchain.sh --repair`. See
+  [GETTING-STARTED.md](GETTING-STARTED.md), *Toolchain swaps*.
 
 ## First app
 
@@ -229,261 +101,149 @@ xtool dev run
 ```
 
 `xtool dev build` alone produces `xtool/HelloOmarchy.app` (arm64 Mach-O).
+An existing Xcode project: `tools/xcodeproj2xtool.py App.xcodeproj` writes an
+xtool adapter next to it, with SourceKit-LSP support. See
+[GETTING-STARTED.md](GETTING-STARTED.md), step 2.
 
-## Device
+## Run on your iPhone
 
-Plug the iPhone in, tap Trust when prompted, then:
+Plug the iPhone in, tap **Trust** when prompted, then, from the project
+directory:
 
 ```
 ./device-run.sh
 ```
 
-> **Try Omarchy on Windows:** If this Omarchy installation runs in the virtual
-> machine distributed by [tryomarchy.com](https://tryomarchy.com), complete the
-> [Windows VM iPhone USB setup](TRYOMARCHY-WINDOWS-USB.md) first. It provides
-> working USB passthrough and a patched `usbmuxd` for reliable app installs.
-> Bare-metal Omarchy installations do not need that guide.
+`device-run.sh` pairs, installs and launches the app. `--lldb` attaches LLDB
+without root. With `--rsd` or `--over-tailnet`, `--console [SECONDS]` streams
+the app's own output and `--symbolicate` pulls and resolves crash reports
+([docs/CRASH-SYMBOLICATION.md](docs/CRASH-SYMBOLICATION.md)).
 
-Wireless deploy is **blocked on iOS 26** for Linux-only setups, tested
-exhaustively (FINDINGS.md 17). iOS gives each host its own encrypted
-RemotePairing tunnel. A Linux host has no way to claim one. A Mac
-that once enabled "Connect via Network" holds a working wireless tunnel.
-Everyone else is refused. USB deploy works everywhere with no Apple-side
-gate. When your phone DOES hold a tunnel with some host, `device-run.sh`
-documents the pymobiledevice3 tunneld bridge for that case, and
-`device-run.sh --rsd` can drive any tunnel endpoint you hold.
+Use USB for initial pairing. The Linux wireless RemotePairing path is
+blocked on iOS 26 (FINDINGS.md item 17). On iOS 27, pair once over USB and
+copy the pairing record to the host on your tailnet. With Wi-Fi and
+Tailscale connected on the phone, that host can install, launch, screenshot
+and read logs without a cable
+([docs/OVER-TAILNET.md](docs/OVER-TAILNET.md), measured 2026-10-10).
 
-## Remote and wireless iPhone work over Tailscale
+Pairing records are device credentials. Keep them private and copy them
+only to hosts you trust.
 
-On iOS 27 you can install, launch, screenshot and read the log of an iPhone
-from any Linux host on your tailnet. No cable and no Mac are needed. The
-phone can be anywhere, as long as it has Wi-Fi and Tailscale on. iOS 26
-stays blocked, see above.
+> Running Omarchy in the [tryomarchy.com](https://tryomarchy.com) Windows VM?
+> Do the [Windows VM iPhone USB setup](TRYOMARCHY-WINDOWS-USB.md) first.
+> Bare-metal installs do not need it.
 
-**One time, phone on USB (2 minutes):**
+## Flutter apps
 
-```sh
-python3.14 -m venv ~/pmd3 && ~/pmd3/bin/pip install pymobiledevice3   # Python 3.13 or newer
-~/pmd3/bin/python tools/tailnet-tunnel.py pair                         # no tap on the phone
-```
-
-Copy `~/.local/share/pymobiledevice3/remote_<udid>.plist` to the same path on
-every host that should reach the phone. It holds a private key. Treat it like
-an SSH key.
-
-**Every time:** keep Wi-Fi on (cellular only fails), keep Tailscale connected.
-Enter the passcode once after a restart.
-Then, from any tailnet host (`tailscale status` shows the phone's `100.x` address):
-
-```sh
-./device-run.sh --over-tailnet 100.x.y.z path/to/App.ipa      # install and launch, tunnel closed on exit
-
-~/pmd3/bin/python tools/tailnet-tunnel.py 100.x.y.z --hold 600  # or open the tunnel yourself; prints "RSD <addr> <port>"
-~/pmd3/bin/pymobiledevice3 developer dvt screenshot shot.png --rsd <addr> <port>
-~/pmd3/bin/pymobiledevice3 syslog live --rsd <addr> <port>
-```
-
-| Phone state (iOS 27.0.1, measured 2026-10-10) | Works |
-|---|---|
-| Cable in, Wi-Fi on | yes |
-| Cable out, Wi-Fi on, host on a different subnet than the phone | yes, same port after a Wi-Fi toggle |
-| Screen locked | yes (screenshot shows the lock screen) |
-| Wi-Fi off, cellular only | **no**: the phone closes the RemotePairing port |
-
-Details, the failure list with fixes, the install-with-no-mDNS commands (Tailscale or a plain IP) and the parked
-phone-side app note are in [docs/OVER-TAILNET.md](docs/OVER-TAILNET.md).
-
-## Ship apps to the App Store and TestFlight
-
-From an xtool project directory:
+Verified on x86_64 with Flutter 3.47.6
+([receipt](receipts/2026-10-08-flutter-signed-ipa.md)). Release mode, arm64
+device builds only: no debug, hot reload or simulator. Plugins must ship a
+`Package.swift`. aarch64 hosts are untested. Details:
+[flutter/README.md](flutter/README.md).
 
 ```
-~/omarchy-apple-dev/ship.sh
+./install-toolchain.sh                    # once, as for any app in this repo
+sudo pacman -S --needed llvm rsync        # the two tools the Flutter build calls
+flutter/setup.sh                          # once per Flutter version: ~7 GB, 5-12 min
+
+flutter create --platforms ios counter    # or use your own Flutter app
+flutter/build.sh counter                  # -> build/ios-linux/Runner.ipa (unsigned), 29 s for the template
+
+flutter/build.sh --install counter        # free Apple ID route: xtool signs and installs
 ```
 
-`ship.sh` builds a release `.app`. It compiles the app's `AppIcon` set with the
-Linux `actool --app-icon` (Xcode's single-size 1024 icon, with its dark and
-tinted variants, is expanded to the App Store sizes; `APP_ICON=<name>` picks
-another set). It stamps the build-environment keys App Store processing reads
-(`DTXcode`, `DTSDKName`, …, and a UTC `CFBundleVersion`). It wraps each SwiftPM
-`.dynamic` product as a `.framework` (App Store processing rejects a loose
-`.dylib`). It signs with `rcodesign` and packages `xtool/<App>.ipa`.
-Then it validates the `.ipa` offline. It checks bundle layout, Info.plist keys
-and version formats, Mach-O arch and minimum OS, icons in `Assets.car`,
-profile type and app id, entitlements, team id and every sealed hash. Any
-`FAIL` stops it.
-Without an App Store Connect key it signs with a local TEST identity. That
-output proves the pipeline, and Apple will reject that signature.
+For a signed development `.ipa` for a specific device:
+`tools/provision-dev.py --bundle-id <id>` then
+`tools/sign-dev.sh <App>.app out.ipa`. For the App Store and TestFlight:
+`flutter/ship.sh --upload counter` (same key variables as `ship.sh --upload`
+below).
 
-SwiftPM keeps a target's resources in its resource bundle, where only
-`Bundle.module` finds them. `ship.sh` moves the files Apple needs at the app
-root (storyboards, nibs and the app's own `PrivacyInfo.xcprivacy`) and leaves the
-rest in the bundle. If app code reads other resources through `Bundle.main`, set
-`ROOT_RESOURCES` to the space-separated patterns to move as well, for example
-`ROOT_RESOURCES='*.lproj *.wav'` for localized strings, `InfoPlist.strings` and
-sounds. The patterns match only top-level entries of each resource bundle, and they
-apply to the app and to each extension bundle. Keep the list short: copying everything into an upload once stalled App
-Store processing (`--device` builds still copy everything).
+Flutter support is the work of
+[dl-alexandre](https://github.com/dl-alexandre) (@agrxculture). Thank you for
+the build pipeline ([#7](https://github.com/joshuaswarren/omarchy-apple-dev/pull/7)),
+the Linux `ibtool` for Flutter's storyboards
+([#8](https://github.com/joshuaswarren/omarchy-apple-dev/pull/8)) and plugin
+package support ([#9](https://github.com/joshuaswarren/omarchy-apple-dev/pull/9)).
 
-For HTTPS authentication callbacks, set `ASC_ENTITLEMENTS_PATH` to the app's
-requested entitlements plist when running `ship.sh`. The signer copies its exact
-`com.apple.developer.associated-domains` values (`applinks:` and
-`webcredentials:`), never the provisioning profile's wildcard. Enable the
-`ASSOCIATED_DOMAINS` capability for the bundle ID in Apple Developer and recreate
-the provisioning profile first; this option does not enable capabilities through
-the API. Signing fails if the profile does not grant the requested domains.
-Offline verification accepts concrete domain values against a `*` profile grant
-and rejects mismatches. Existing entitlements and builds without this option
-are unchanged. Confirm the HTTPS callback on a signed device build.
+## Ship to TestFlight and the App Store
 
-The same file can request push and Sign in with Apple. With `aps-environment`
-in it, the app is signed with the environment the profile grants (an App Store
-profile grants `production`, as Xcode signs it), so a file that says
-`development` works for both device and App Store builds. With
-`com.apple.developer.applesignin` (`["Default"]`), the app is signed with it. Enable
-`PUSH_NOTIFICATIONS` or `APPLE_ID_AUTH` for the bundle ID first; signing fails if
-the profile does not grant what the file requests, and offline verification
-checks both values.
-
-To upload, once:
-
-1. Create an App Store Connect API team key (role App Manager with access to
-   Certificates, Identifiers & Profiles, or Admin). Save the `.p8` file
-   anywhere you like.
-2. Create the app record in App Store Connect (Apps > + > New App). The API
-   cannot create apps.
-
-Then:
+Once: create an App Store Connect API team key (role App Manager with access
+to Certificates, Identifiers & Profiles) and keep the `.p8` private; create
+the app record in App Store Connect (Apps > + > New App; the API cannot
+create apps). Then, from an xtool project directory:
 
 ```
 ASC_KEY_PATH=/path/to/AuthKey_XXXXXXXXXX.p8 ASC_ISSUER_ID=<issuer-uuid> ASC_KEY_ID=XXXXXXXXXX \
   ~/omarchy-apple-dev/ship.sh --upload
 ```
 
-To sign the way an existing Xcode setup does, set `ASC_EXPORT_OPTIONS` to its
-`ExportOptions.plist` (the file `xcodebuild -exportArchive` and `flutter build
-ipa --export-options-plist` take). `method` must be `app-store-connect` (or
-the older `app-store`); any other method, or none, which Xcode reads as
-`development`, stops signing. `teamID` must be the profiles' team, and
-`signingCertificate` must name a distribution certificate or be the SHA-1 of
-the local one. `provisioningProfiles` maps a bundle id to an existing App Store
-profile by name or UUID, used instead of the one `asc.py` makes. That profile
-must list the local Apple Distribution certificate, because rcodesign signs
-with the local private key; signing stops and says so when it does not. Keys
-that only steer Xcode's export (`uploadSymbols`, `signingStyle`,
-`destination`, ...) are reported and ignored. `tests/test_export_options.py`
-covers these rules offline.
+`ship.sh` builds a release `.app`, compiles the app icon, registers the bundle
+id, creates an Apple Distribution certificate (the private key stays in
+`~/.config/omarchy-apple-dev/distribution/`) and an App Store profile, signs
+with `rcodesign`, validates the `.ipa` offline (any `FAIL` stops it), uploads
+and prints Apple's processing result. It never submits a build for review.
 
-With the key set, `ship.sh` registers the bundle id. It creates an Apple
-Distribution certificate (the private key stays in
-`~/.config/omarchy-apple-dev/distribution/`) and an App Store profile. It
-uploads through the App Store Connect build-upload API and prints Apple's
-processing result. Builds made this way, entirely on Linux, are `VALID` and
-App Store eligible in App Store Connect. That covers the demo app
-(FINDINGS.md item 38) and NetNewsWire with its extensions and 15 frameworks
-(item 40). `ship.sh` never submits a build for review.
+Without a key it signs with a local TEST identity. That proves the pipeline
+only; Apple rejects the signature.
+
+Proven: builds made entirely on Linux are `VALID` in App Store Connect, for
+the demo app (FINDINGS.md item 38) and for NetNewsWire with its extensions and
+15 frameworks (item 40). Signing details, covering entitlements (Associated
+Domains, push, Sign in with Apple), `ROOT_RESOURCES` and Xcode
+`ExportOptions.plist`, are in [docs/SHIPPING.md](docs/SHIPPING.md).
 
 ## Real projects
 
-`install-toolchain.sh` also installs Linux stand-ins for Apple's `actool`,
-`xcstringstool` and `momc` into the darwin SDK. Packages that declare
-`.xcassets`, `.xcstrings` or Core Data resources then build. So does an
-OpenAppleMacros build with SwiftData (`@Model`, `@Query`, …), Foundation
-(`#Predicate`, `#Expression`) and `#Preview` macros. Large projects need more
-open files than a login shell allows. Run `ulimit -n 65536` before
-`xtool dev build`.
-
-The Linux `actool` compiles imagesets (PNG, JPEG, SVG, PDF, HEIC), colorsets,
-custom SF Symbol sets, app icons and Icon Composer `.icon` icons with their
-layers and Liquid Glass pre-render (FINDINGS.md). PDF imagesets need poppler's
-`pdftocairo` and HEIC images libheif's `heif-convert`. The installer adds
-both. `tools/ibtool` compiles storyboards and xibs byte-identical to Xcode 27.0
-(all of NetNewsWire's, Flutter's template pair; `tests/ibtool`). The generator
-leaves out any it cannot reproduce, with a warning. Alternate app icons are
-left out with a warning. `compat/icecubes/`, `compat/nnw/` and
-`compat/mastodon/` reproduce IceCubesApp, NetNewsWire and Mastodon for iOS.
-They build with their app extensions and are `VALID` in App Store Connect.
-Mastodon needs two overlay changes, applied by its setup script (FINDINGS.md
-item 41).
-
-For your own Xcode project, `tools/xcodeproj2xtool.py App.xcodeproj` writes an
-xtool adapter (`omarchy-xtool/`) next to it. It prints a warning for each thing
-it cannot map (FINDINGS.md item 27).
+The installer puts Linux stand-ins for Apple's `actool`, `xcstringstool` and
+`momc` into the SDK, so packages declaring `.xcassets`, `.xcstrings` or Core
+Data resources build. The Linux `ibtool` compiles NetNewsWire's storyboards
+and Flutter's two template storyboards byte-identical to Xcode 27.0.
+[compat/icecubes/](compat/icecubes/), [compat/nnw/](compat/nnw/) and
+[compat/mastodon/](compat/mastodon/) build IceCubesApp, NetNewsWire and
+Mastodon for iOS with their app extensions, all `VALID` in App Store Connect.
+Large projects need `ulimit -n 65536` before `xtool dev build`.
 
 ## Scripts
 
-- `install-toolchain.sh`: everything up to and including the SDK install.
-  `--repair` re-registers the cached SDK into the current toolchain after a
-  toolchain swap (see *Toolchain swaps* above). `--curses-compat [ROOT]`
-  creates the curses sonames a vendor (mise/swift.org) toolchain needs on
-  Arch and optionally verifies ROOT resolves. `--user-only` skips every sudo
-  step and uses the Swift already on PATH.
-- `device-run.sh`: pair, install, launch, LLDB attach. `--network` and
-  `--rsd` modes cover wireless deploys (unverified). `--lldb` needs no root
-  (userspace tunnel; `--sudo` for the old kernel-tunnel path). `LLDB_CMDS`
-  runs LLDB commands after the attach, in synchronous mode. `LLDB_LOAD_LEVEL`
-  (default `minimal`) trades system-frame symbols for a ~30 s attach.
-  `--console [SECONDS]` streams an app's stdout and stderr after an `--rsd`
-  or `--over-tailnet` install, reports `running after N s` and
-  `fatal text seen`, and stops the app. A stream from a running app
-  through `--console` is not yet proven on a phone.
-  `--symbolicate [DIR]` pulls the crash reports after an `--rsd` or
-  `--over-tailnet` install and prints each one through
-  `tools/ips-symbolicate.py`
-  ([docs/CRASH-SYMBOLICATION.md](docs/CRASH-SYMBOLICATION.md)). The live run
-  of the pull is not yet proven on a phone.
-  `--attach` attaches to the already-running app without reinstalling.
-  usbmuxd 1.1.1 can abort after a session ends. A `Restart=on-failure`
-  drop-in recovers it (FINDINGS.md item 67).
-- `ship.sh`: App Store `.ipa` build, offline validation, and `--upload`.
-  Helpers: `tools/asc.py` (stamp, identity, validate, upload) and
-  `tools/darwin-tools` (the Linux `actool`, on AssetKit) and
-  `tools/xcstringstool` (String Catalogs).
+- `install-toolchain.sh`: toolchain and SDK install. `--repair`,
+  `--user-only`, `--curses-compat`.
+- `device-run.sh`: pair, install, launch, LLDB, console, crash pull; `--rsd`
+  and `--over-tailnet` for tunnel installs.
+- `ship.sh`: App Store `.ipa`, offline validation, `--upload`. Helpers:
+  `tools/asc.py`, `tools/darwin-tools`, `tools/xcstringstool`.
 - `ship-mac.sh`: macOS `.app` from a SwiftPM package, Developer ID signing,
-  and `--notarize` (Apple's notary service, ticket stapled).
-- `tools/xcodeproj2xtool.py`: an xtool adapter for an Xcode project's iOS app
-  target (`--self-test` checks it).
-- `tools/ips-symbolicate.py`: reads a pulled `.ips` crash report on Linux and
-  resolves stripped frames against local Mach-O files by `LC_UUID`
-  ([docs/CRASH-SYMBOLICATION.md](docs/CRASH-SYMBOLICATION.md)).
+  `--notarize`.
+- `tools/xcodeproj2xtool.py`: xtool adapter for an Xcode project.
+- `tools/ips-symbolicate.py`: resolve a pulled `.ips` crash report on Linux.
 
-## Findings
+## Documentation
 
-[FINDINGS.md](FINDINGS.md) records the thirty-nine findings behind the working
-run. It holds what broke and how each was fixed (SDK install failures, a clang
-version mismatch that breaks SwiftUI, the unstated prerequisites for debugging
-on iOS 17+). It also holds the Swift/Xcode version matrix (items 15-16), why a
-toolchain swap breaks SDK registration and how `--repair` restores it (item
-19), the mise/ncurses soname story (items 20-21), the move to xtool 1.20 +
-Swift 6.4 + Xcode 27 (item 22), the App Store path (item 23), the
-IceCubesApp compatibility run (items 24 and 26), the no-sudo install
-(item 25, and on aarch64 in item 28), and the `.xcodeproj` adapter generator
-(item 27).
+- [GETTING-STARTED.md](GETTING-STARTED.md): from the Omarchy menu to
+  TestFlight, including toolchain swaps and common failures.
+- [docs/TEST-MATRIX.md](docs/TEST-MATRIX.md): what ran on an iPhone vs what
+  only builds.
+- [docs/OVER-TAILNET.md](docs/OVER-TAILNET.md): cable-free deploys on iOS 27.
+- [docs/SHIPPING.md](docs/SHIPPING.md): `ship.sh` signing options.
+- [docs/DISTROS.md](docs/DISTROS.md): Ubuntu, Fedora, NixOS.
+- [docs/CRASH-SYMBOLICATION.md](docs/CRASH-SYMBOLICATION.md): reading crash
+  reports on Linux.
+- [sdk-free/README.md](sdk-free/README.md): the no-Xcode mode.
+- [flutter/README.md](flutter/README.md): the Flutter pipeline.
+- [FINDINGS.md](FINDINGS.md): dated findings and fixes, with supporting
+  test records under `receipts/`.
 
 ## Notes
 
-- `clang` on PATH must be the Swift toolchain's own clang, not the system
-  clang. The SDK install copies the host clang headers into the bundle. A
-  version mismatch between host clang and the Swift compiler produces
-  `__builtin_bit_cast` size errors when compiling SwiftUI. Both scripts in
-  this repo put it first on PATH themselves. In your own shell use
+- The `clang` on PATH must be the Swift toolchain's own, not the system clang;
+  a version mismatch breaks SwiftUI with `__builtin_bit_cast` errors. Both
+  scripts in this repo put it first on PATH themselves. In your own shell:
   `PATH="$(dirname "$(readlink -f "$(command -v swift)")"):$PATH"`.
-- Building SwiftUI pulls in simd/arm_neon headers. The first build takes about
-  a minute on an M1.
 
 ## Support
 
-Every bit of support helps keep omarchy-apple-dev alive and free. If you are
-able, [sponsor on GitHub](https://github.com/sponsors/joshuaswarren) or send a
-Lightning donation to `joshuaswarren@strike.me` to directly fund continued
-development and new integrations.
-
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?style=for-the-badge)](https://github.com/sponsors/joshuaswarren)
-
-If financial support is not an option, you can still make a big difference:
-[star the repo](https://github.com/joshuaswarren/omarchy-apple-dev), share it,
-or recommend it to a colleague. Word of mouth is how most people find
-omarchy-apple-dev.
+omarchy-apple-dev is free. If it helps you,
+[sponsor the project](https://github.com/sponsors/joshuaswarren) or send
+Lightning to `joshuaswarren@strike.me`.
 
 ## License
 
