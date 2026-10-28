@@ -1,0 +1,132 @@
+"""Ordering and refusal paths of tools/ibtool _constraint_order.
+
+The corpus compiles reach most of the sort key, but not the macOS
+grandchild-group walk, the guide-item group for a guide that is itself the
+sort item, or the two attribute refusals. These tests pin the exact order the
+function returns (direct calls, macOS included: tools/ibmac.py passes
+mac=True) and the exact XibError text of the two refusals (compiled through
+the CLI, as a user would hit them).
+"""
+import importlib.machinery
+import importlib.util
+import subprocess
+import sys
+import tempfile
+import unittest
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+TOOLS = HERE.parent / "tools"
+IBTOOL = TOOLS / "ibtool"
+FLAGS = ["--target-device", "iphone", "--target-device", "ipad",
+         "--minimum-deployment-target", "17.0"]
+
+BASE = (HERE / "ibtool" / "src" / "probes" / "attr-top.xib").read_text()
+
+_loader = importlib.machinery.SourceFileLoader("ibtool_module", str(IBTOOL))
+_spec = importlib.util.spec_from_loader(_loader.name, _loader)
+ibtool = importlib.util.module_from_spec(_spec)
+_loader.exec_module(ibtool)
+
+# One owner view V, a safe-area guide G, direct subviews A (at the origin)
+# and B, and a grandchild K of A. cKB is only legal on macOS (a grandchild
+# has no group on iOS and must refuse).
+TREE = """<view id="V" userLabel="root">
+  <viewLayoutGuide key="safeArea" id="G"/>
+  <subviews>
+    <label id="A"><rect key="frame" x="0.0" y="0.0" width="10" height="10"/>
+      <subviews><button id="K"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/></button></subviews>
+    </label>
+    <label id="B"><rect key="frame" x="0.0" y="20.0" width="10" height="10"/></label>
+  </subviews>
+  <constraints>{}</constraints>
+</view>"""
+
+
+def order_of(constraints, mac=False):
+    el = ET.fromstring(TREE.format(constraints))
+    cons = el.find("constraints").findall("constraint")
+    return [c.get("id") for c in ibtool._constraint_order(el, cons, "t", mac=mac)]
+
+
+def ref(message):
+    return f'error: ibtool: {message}'
+
+
+class ConstraintOrder(unittest.TestCase):
+    def test_ios_groups(self):
+        """Guide-item, guide-to-owner, subview, owner-width and owner-side
+        constraints sort in that group order on iOS."""
+        cons = """
+    <constraint firstItem="G" firstAttribute="top" secondItem="B" secondAttribute="top" id="cGI"/>
+    <constraint firstItem="G" firstAttribute="top" secondItem="V" secondAttribute="top" id="cGA"/>
+    <constraint firstItem="A" firstAttribute="top" secondItem="B" secondAttribute="top" id="cAB"/>
+    <constraint firstAttribute="width" constant="9" id="cW"/>
+    <constraint firstItem="B" firstAttribute="trailing" secondItem="V" secondAttribute="trailing" id="cBT"/>
+    <constraint firstItem="B" firstAttribute="top" secondItem="V" secondAttribute="top" id="cBB"/>"""
+        self.assertEqual(order_of(cons),
+                         ["cGI", "cGA", "cAB", "cW", "cBT", "cBB"])
+
+    def test_mac_groups(self):
+        """On macOS the guide-item constraints, the direct-subview constraint
+        and the grandchild constraint (inside its ancestor's group) sort in
+        that order."""
+        cons = """
+    <constraint firstItem="A" firstAttribute="top" secondItem="B" secondAttribute="top" id="cAB"/>
+    <constraint firstItem="K" firstAttribute="top" secondItem="B" secondAttribute="top" id="cKB"/>
+    <constraint firstItem="G" firstAttribute="width" secondItem="A" secondAttribute="width" id="gW"/>
+    <constraint firstItem="G" firstAttribute="top" secondItem="A" secondAttribute="top" id="gT"/>"""
+        self.assertEqual(order_of(cons, mac=True),
+                         ["cAB", "gW", "gT", "cKB"])
+
+    def test_mac_unknown_item_refused(self):
+        """A macOS constraint naming an item with no frame names the
+        constraint id and the item."""
+        cons = """
+    <constraint firstItem="ZZ" firstAttribute="top" secondItem="B" secondAttribute="top" id="cZZ"/>"""
+        with self.assertRaises(ibtool.XibError) as cm:
+            order_of(cons, mac=True)
+        self.assertEqual(str(cm.exception),
+                         "constraint cZZ: no frame for item 'ZZ'; "
+                         "Apple's order unknown (t)")
+
+    def compile_variant(self, old, new):
+        self.assertEqual(BASE.count(old), 1, f"anchor not unique: {old}")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "VarMod")
+            src.mkdir()
+            (src / "Variant.xib").write_text(BASE.replace(old, new))
+            out = Path(tmp, "out")
+            p = subprocess.run([sys.executable, str(IBTOOL), *FLAGS,
+                                "--compile", str(out / "o.nib"),
+                                str(src / "Variant.xib")],
+                               capture_output=True, text=True, timeout=280)
+            return p.returncode, p.stderr
+
+    def assert_refused(self, old, new, message):
+        rc, err = self.compile_variant(old, new)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(ref(message), err)
+
+    def test_owner_side_unknown_attribute_refused(self):
+        """A constraint to the owner view on an attribute outside the owner
+        order refuses (attr-top cell, top to the owner changed to left)."""
+        self.assert_refused(
+            '<constraint firstItem="TRx-RV-za8" firstAttribute="top" secondItem="FzD-t2-JGy" secondAttribute="top" constant="14" id="cze-hi-8Uh"/>',
+            '<constraint firstItem="TRx-RV-za8" firstAttribute="left" secondItem="FzD-t2-JGy" secondAttribute="top" constant="14" id="cze-hi-8Uh"/>',
+            "constraint cze-hi-8Uh: left/top to the owner view; "
+            "Apple's order unknown (Variant.xib object #2)")
+
+    def test_unknown_attribute_pair_refused(self):
+        """A subview-to-subview constraint on an attribute outside the iOS
+        order refuses."""
+        self.assert_refused(
+            '<constraint firstItem="TRx-RV-za8" firstAttribute="top" secondItem="yiw-9t-gil" secondAttribute="trailing" constant="8" symbolic="YES" id="RUN-Ol-xSl"/>',
+            '<constraint firstItem="TRx-RV-za8" firstAttribute="baseline" secondItem="yiw-9t-gil" secondAttribute="trailing" constant="8" symbolic="YES" id="RUN-Ol-xSl"/>',
+            "constraint RUN-Ol-xSl: attribute baseline/trailing; "
+            "Apple's order unknown (Variant.xib object #2)")
+
+
+if __name__ == "__main__":
+    unittest.main()
