@@ -47,6 +47,19 @@ SUBS_MAC = """
       <subviews><button id="K"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/></button></subviews>
     </label>
     <label id="B"><rect key="frame" x="0.0" y="20.0" width="10" height="10"/></label>"""
+SUBS_MAC_DEEP = """
+    <label id="A"><rect key="frame" x="0.0" y="0.0" width="10" height="10"/>
+      <subviews><button id="D1"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/>
+          <subviews><button id="D2"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/>
+              <subviews><button id="D3"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/>
+                  <subviews><button id="D4"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/>
+                    <subviews><button id="D5"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/></button></subviews>
+                  </button></subviews>
+              </button></subviews>
+          </button></subviews>
+      </button></subviews>
+    </label>
+    <label id="B"><rect key="frame" x="0.0" y="20.0" width="10" height="10"/></label>"""
 
 
 def order_of(subviews, constraints, mac=False):
@@ -93,6 +106,17 @@ class ConstraintOrder(unittest.TestCase):
     <constraint firstItem="G" firstAttribute="top" secondItem="A" secondAttribute="top" id="gT"/>"""
         self.assertEqual(order_of(SUBS_MAC, cons, mac=True),
                          ["cAB", "gW", "gT", "cKB", "bA"])
+
+    def test_mac_grandchild_depth_fraction(self):
+        """A grandchild five levels under A stays in A's group at
+        A + 5/10 = A + 0.5, before the next subview B. A depth / 5 fraction
+        would put it at A + 1.0, tied with B's group, where cB wins the
+        other-side tie-break and the order swaps."""
+        cons = """
+    <constraint firstItem="D5" firstAttribute="top" secondItem="B" secondAttribute="top" id="cD"/>
+    <constraint firstItem="B" firstAttribute="top" secondItem="A" secondAttribute="top" id="cB"/>"""
+        self.assertEqual(order_of(SUBS_MAC_DEEP, cons, mac=True),
+                         ["cD", "cB"])
 
     def test_mac_unknown_item_refused(self):
         """A macOS constraint naming an item with no frame names the
