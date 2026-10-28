@@ -21,6 +21,7 @@ Mutants (each must fail its row; checked by hand when the test was written):
 import ast
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -55,7 +56,10 @@ def namespace():
 
 
 def run_cli(version, command):
-    return subprocess.run([sys.executable, "-c", DRIVER, version, command], capture_output=True, text=True, check=False)
+    # test-identity makes its OUTDIR before it fails: run in a temporary directory, not in the repo.
+    with tempfile.TemporaryDirectory() as tmp:
+        return subprocess.run([sys.executable, "-c", DRIVER, version, command], capture_output=True, text=True,
+                              check=False, cwd=tmp)
 
 
 class AscCryptography(unittest.TestCase):
