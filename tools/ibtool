@@ -4708,8 +4708,9 @@ def compile_storyboard(path, compilation_dir):
 
 
 
-def _compile_storyboard_inner(path, compilation_dir, doc, name):
-    resources, named = _parse_color_resources(doc, path)
+def _compile_storyboard_device(doc, path):
+    """The device id and the scene list, refusing an unsupported device
+    element and a storyboard without scenes."""
     dev_el = doc.find("device")
     device = dev_el.get("id") if dev_el is not None else None
     if dev_el is not None and (dev_el.get("orientation") != "portrait"
@@ -4718,14 +4719,13 @@ def _compile_storyboard_inner(path, compilation_dir, doc, name):
     scenes = doc.findall("scenes/scene")
     if not scenes:
         raise XibError(f"{path}: no scenes")
-    identifiers = {}
-    id_to_name = {}
-    entry_id = doc.get("initialViewController")
-    sbc = os.path.join(compilation_dir, f"{name}.storyboardc")
-    os.makedirs(sbc, exist_ok=True)
-    where = os.path.basename(path)
-    # Navigation and split view controllers encode their child controllers
-    # inside their own nib; only a child's view gets a nib of its own.
+    return device, scenes
+
+
+def _compile_storyboard_embedded(scenes, where):
+    """Which view controllers are encoded inside a parent's own nib: a
+    navigationController's rootViewController child and a splitViewController's
+    relationship children. Returns ({child id: parent id}, {split id: child ids})."""
     embedded = {}
     splits = {}
     for scene in scenes:
@@ -4741,10 +4741,12 @@ def _compile_storyboard_inner(path, compilation_dir, doc, name):
             kids = _split_relationship_children(split_el, where)
             splits[split_el.get("id")] = kids
             embedded.update(dict.fromkeys(kids, split_el.get("id")))
-    vcs = {}
-    for tag in ("viewController", "tableViewController", "collectionViewController"):
-        for vc in doc.iterfind(f"scenes/scene/objects/{tag}"):
-            vcs[vc.get("id")] = vc
+    return embedded, splits
+
+
+def _compile_storyboard_nav_bar_center(scenes):
+    """Point NAV_BAR_CENTER_Y at the first navigation scene's bar mid
+    (y + half of the 54pt bar), or clear it for storyboards without one."""
     global NAV_BAR_CENTER_Y
     NAV_BAR_CENTER_Y = None
     for scene in scenes:
@@ -4754,61 +4756,107 @@ def _compile_storyboard_inner(path, compilation_dir, doc, name):
             if bar_rect is not None and bar_rect.get("y") is not None:
                 NAV_BAR_CENTER_Y = float(bar_rect.get("y")) + 27.0
             break
+
+
+def _compile_storyboard_nav_scene(objs, embedded, vcs, out_dir, where, identifiers, id_to_name):
+    """A navigation scene: the controller nib holds the root's view. Writes
+    the nib and records the identifier; True iff the scene was one."""
+    nav = objs.find("navigationController") if objs is not None else None
+    if nav is None:
+        return False
+    root = vcs.get(next((k for k, v in embedded.items() if v == nav.get("id")), None))
+    if root is None:
+        raise XibError(f"{where}: navigationController {nav.get('id')} root not found")
+    root_view = root.find("*[@key='view']")
+    nav_builder = _scene_nav_nib_ident if nav.get("storyboardIdentifier") else _scene_nav_nib
+    arch, vc_name = nav_builder(nav, root, f"{root.get('id')}-view-{root_view.get('id')}", where)
+    with open(os.path.join(out_dir, vc_name + ".nib"), "wb") as f:
+        f.write(arch)
+    identifiers[vc_name] = vc_name
+    id_to_name[nav.get("id")] = vc_name
+    return True
+
+
+def _compile_storyboard_split_scene(objs, splits, vcs, out_dir, where, resources, named,
+                                    identifiers, id_to_name):
+    """A splitViewController scene: one nib for the split and its children.
+    Writes the nib and records the identifier; True iff the scene was one."""
+    split_el = objs.find("splitViewController") if objs is not None else None
+    if split_el is None:
+        return False
+    kids = [vcs[k] for k in splits[split_el.get("id")]]
+    arch, vc_name = _scene_split_nib(split_el, kids, where, resources, named)
+    with open(os.path.join(out_dir, vc_name + ".nib"), "wb") as f:
+        f.write(arch)
+    identifiers[vc_name] = vc_name
+    id_to_name[split_el.get("id")] = vc_name
+    return True
+
+
+def _compile_storyboard_vc_scene(objs, device, embedded, out_dir, where, resources, named,
+                                 identifiers, id_to_name):
+    """A plain view controller scene: the view nib, then the controller nib
+    unless the controller is encoded in its parent and has no identifier."""
+    vc_el = None
+    for tag in ("viewController", "tableViewController", "collectionViewController"):
+        vc_el = objs.find(tag) if objs is not None else None
+        if vc_el is not None:
+            break
+    if vc_el is None:
+        raise XibError(f"{where}: scene has no viewController (unsupported scene kind)")
+    view_el = vc_el.find("*[@key='view']")
+    if view_el is None or not view_el.get("id"):
+        raise XibError(f"{where}: viewController has no keyed view")
+    vc_id = vc_el.get("id")
+    if not vc_id:
+        raise XibError(f"{where}: viewController has no id")
+    view_nib = f"{vc_id}-view-{view_el.get('id')}"
+    if view_el.tag == "tableView":
+        table_device = device if vc_el.find("simulatedNavigationBarMetrics") is not None else None
+        varch = _scene_table_view_nib(vc_el, view_el, where, resources, named, table_device)
+    elif view_el.tag in ("view", "collectionView"):
+        varch = _scene_view_nib(vc_el, view_el, where, resources, named, DEVICE_SIZES.get(device))
+    else:
+        raise XibError(f"{where}: unsupported view kind <{view_el.tag}>")
+    with open(os.path.join(out_dir, view_nib + ".nib"), "wb") as f:
+        f.write(varch)
+    if vc_id in embedded and not vc_el.get("storyboardIdentifier"):
+        return
+    arch, vc_name = _scene_vc_nib(vc_el, where, resources, named)
+    with open(os.path.join(out_dir, vc_name + ".nib"), "wb") as f:
+        f.write(arch)
+    identifiers[vc_name] = vc_name
+    id_to_name[vc_id] = vc_name
+
+
+def _compile_storyboard_inner(path, compilation_dir, doc, name):
+    resources, named = _parse_color_resources(doc, path)
+    device, scenes = _compile_storyboard_device(doc, path)
+    identifiers = {}
+    id_to_name = {}
+    entry_id = doc.get("initialViewController")
+    sbc = os.path.join(compilation_dir, f"{name}.storyboardc")
+    os.makedirs(sbc, exist_ok=True)
+    where = os.path.basename(path)
+    # Navigation and split view controllers encode their child controllers
+    # inside their own nib; only a child's view gets a nib of its own.
+    embedded, splits = _compile_storyboard_embedded(scenes, where)
+    vcs = {}
+    for tag in ("viewController", "tableViewController", "collectionViewController"):
+        for vc in doc.iterfind(f"scenes/scene/objects/{tag}"):
+            vcs[vc.get("id")] = vc
+    _compile_storyboard_nav_bar_center(scenes)
     out_dir = sbc
     for scene in scenes:
         objs = scene.find("objects")
-        nav = objs.find("navigationController") if objs is not None else None
-        if nav is not None:
-            root = vcs.get(next((k for k, v in embedded.items() if v == nav.get("id")), None))
-            if root is None:
-                raise XibError(f"{where}: navigationController {nav.get('id')} root not found")
-            root_view = root.find("*[@key='view']")
-            nav_builder = _scene_nav_nib_ident if nav.get("storyboardIdentifier") else _scene_nav_nib
-            arch, vc_name = nav_builder(nav, root, f"{root.get('id')}-view-{root_view.get('id')}", where)
-            with open(os.path.join(out_dir, vc_name + ".nib"), "wb") as f:
-                f.write(arch)
-            identifiers[vc_name] = vc_name
-            id_to_name[nav.get("id")] = vc_name
+        if _compile_storyboard_nav_scene(objs, embedded, vcs, out_dir, where,
+                                         identifiers, id_to_name):
             continue
-        split_el = objs.find("splitViewController") if objs is not None else None
-        if split_el is not None:
-            kids = [vcs[k] for k in splits[split_el.get("id")]]
-            arch, vc_name = _scene_split_nib(split_el, kids, where, resources, named)
-            with open(os.path.join(out_dir, vc_name + ".nib"), "wb") as f:
-                f.write(arch)
-            identifiers[vc_name] = vc_name
-            id_to_name[split_el.get("id")] = vc_name
+        if _compile_storyboard_split_scene(objs, splits, vcs, out_dir, where, resources, named,
+                                           identifiers, id_to_name):
             continue
-        vc_el = None
-        for tag in ("viewController", "tableViewController", "collectionViewController"):
-            vc_el = objs.find(tag) if objs is not None else None
-            if vc_el is not None:
-                break
-        if vc_el is None:
-            raise XibError(f"{where}: scene has no viewController (unsupported scene kind)")
-        view_el = vc_el.find("*[@key='view']")
-        if view_el is None or not view_el.get("id"):
-            raise XibError(f"{where}: viewController has no keyed view")
-        vc_id = vc_el.get("id")
-        if not vc_id:
-            raise XibError(f"{where}: viewController has no id")
-        view_nib = f"{vc_id}-view-{view_el.get('id')}"
-        if view_el.tag == "tableView":
-            table_device = device if vc_el.find("simulatedNavigationBarMetrics") is not None else None
-            varch = _scene_table_view_nib(vc_el, view_el, where, resources, named, table_device)
-        elif view_el.tag in ("view", "collectionView"):
-            varch = _scene_view_nib(vc_el, view_el, where, resources, named, DEVICE_SIZES.get(device))
-        else:
-            raise XibError(f"{where}: unsupported view kind <{view_el.tag}>")
-        with open(os.path.join(out_dir, view_nib + ".nib"), "wb") as f:
-            f.write(varch)
-        if vc_id in embedded and not vc_el.get("storyboardIdentifier"):
-            continue
-        arch, vc_name = _scene_vc_nib(vc_el, where, resources, named)
-        with open(os.path.join(out_dir, vc_name + ".nib"), "wb") as f:
-            f.write(arch)
-        identifiers[vc_name] = vc_name
-        id_to_name[vc_id] = vc_name
+        _compile_storyboard_vc_scene(objs, device, embedded, out_dir, where, resources, named,
+                                     identifiers, id_to_name)
     entry = id_to_name.get(entry_id) if entry_id else None
     plist = {"UIViewControllerIdentifiersToNibNames": {
         key: identifiers[key] for key in keyorder.key_order(list(identifiers))}}
