@@ -29,23 +29,28 @@ _spec = importlib.util.spec_from_loader(_loader.name, _loader)
 ibtool = importlib.util.module_from_spec(_spec)
 _loader.exec_module(ibtool)
 
-# One owner view V, a safe-area guide G, direct subviews A (at the origin)
-# and B, and a grandchild K of A. cKB is only legal on macOS (a grandchild
-# has no group on iOS and must refuse).
-TREE = """<view id="V" userLabel="root">
+# One owner view V and a safe-area guide G, plus direct subviews. The iOS
+# tree has A at the origin and P/Q with equal frame distance from it (so the
+# frame-x tie-break shows), the macOS tree has a grandchild K of A (a
+# grandchild has no group on iOS and must refuse).
+HEAD = """<view id="V" userLabel="root">
   <viewLayoutGuide key="safeArea" id="G"/>
-  <subviews>
+  <subviews>{}</subviews>
+  <constraints>{}</constraints>
+</view>"""
+SUBS_IOS = """
+    <label id="A"><rect key="frame" x="0.0" y="0.0" width="10" height="10"/></label>
+    <label id="P"><rect key="frame" x="0.0" y="30.0" width="10" height="10"/></label>
+    <label id="Q"><rect key="frame" x="30.0" y="0.0" width="10" height="10"/></label>"""
+SUBS_MAC = """
     <label id="A"><rect key="frame" x="0.0" y="0.0" width="10" height="10"/>
       <subviews><button id="K"><rect key="frame" x="0.0" y="0.0" width="5" height="5"/></button></subviews>
     </label>
-    <label id="B"><rect key="frame" x="0.0" y="20.0" width="10" height="10"/></label>
-  </subviews>
-  <constraints>{}</constraints>
-</view>"""
+    <label id="B"><rect key="frame" x="0.0" y="20.0" width="10" height="10"/></label>"""
 
 
-def order_of(constraints, mac=False):
-    el = ET.fromstring(TREE.format(constraints))
+def order_of(subviews, constraints, mac=False):
+    el = ET.fromstring(HEAD.format(subviews, constraints))
     cons = el.find("constraints").findall("constraint")
     return [c.get("id") for c in ibtool._constraint_order(el, cons, "t", mac=mac)]
 
@@ -56,17 +61,24 @@ def ref(message):
 
 class ConstraintOrder(unittest.TestCase):
     def test_ios_groups(self):
-        """Guide-item, guide-to-owner, subview, owner-width and owner-side
-        constraints sort in that group order on iOS."""
+        """Guide-item, guide-to-owner, guide-to-subview, subview, owner-width
+        and owner-side constraints sort in that group order on iOS. The
+        guide-to-subview and subview constraints tie on group, distance and
+        attribute and separate on the other side's subview index; the P and Q
+        constraints tie on distance and separate on the frame x."""
         cons = """
-    <constraint firstItem="G" firstAttribute="top" secondItem="B" secondAttribute="top" id="cGI"/>
+    <constraint firstItem="G" firstAttribute="top" secondItem="P" secondAttribute="top" id="cGI"/>
     <constraint firstItem="G" firstAttribute="top" secondItem="V" secondAttribute="top" id="cGA"/>
-    <constraint firstItem="A" firstAttribute="top" secondItem="B" secondAttribute="top" id="cAB"/>
+    <constraint firstItem="A" firstAttribute="top" secondItem="P" secondAttribute="top" id="cAP"/>
+    <constraint firstItem="G" firstAttribute="top" secondItem="A" secondAttribute="top" id="cGA2"/>
     <constraint firstAttribute="width" constant="9" id="cW"/>
-    <constraint firstItem="B" firstAttribute="trailing" secondItem="V" secondAttribute="trailing" id="cBT"/>
-    <constraint firstItem="B" firstAttribute="top" secondItem="V" secondAttribute="top" id="cBB"/>"""
-        self.assertEqual(order_of(cons),
-                         ["cGI", "cGA", "cAB", "cW", "cBT", "cBB"])
+    <constraint firstItem="P" firstAttribute="trailing" secondItem="V" secondAttribute="trailing" id="cPT"/>
+    <constraint firstItem="P" firstAttribute="top" secondItem="V" secondAttribute="top" id="cPB"/>
+    <constraint firstItem="P" firstAttribute="top" secondItem="Q" secondAttribute="top" id="cPQ"/>
+    <constraint firstItem="Q" firstAttribute="top" secondItem="P" secondAttribute="top" id="cQP"/>"""
+        self.assertEqual(order_of(SUBS_IOS, cons),
+                         ["cGI", "cGA", "cGA2", "cAP", "cW", "cPT", "cPB",
+                          "cPQ", "cQP"])
 
     def test_mac_groups(self):
         """On macOS the guide-item constraints, the direct-subview constraint
@@ -77,7 +89,7 @@ class ConstraintOrder(unittest.TestCase):
     <constraint firstItem="K" firstAttribute="top" secondItem="B" secondAttribute="top" id="cKB"/>
     <constraint firstItem="G" firstAttribute="width" secondItem="A" secondAttribute="width" id="gW"/>
     <constraint firstItem="G" firstAttribute="top" secondItem="A" secondAttribute="top" id="gT"/>"""
-        self.assertEqual(order_of(cons, mac=True),
+        self.assertEqual(order_of(SUBS_MAC, cons, mac=True),
                          ["cAB", "gW", "gT", "cKB"])
 
     def test_mac_unknown_item_refused(self):
@@ -86,7 +98,7 @@ class ConstraintOrder(unittest.TestCase):
         cons = """
     <constraint firstItem="ZZ" firstAttribute="top" secondItem="B" secondAttribute="top" id="cZZ"/>"""
         with self.assertRaises(ibtool.XibError) as cm:
-            order_of(cons, mac=True)
+            order_of(SUBS_MAC, cons, mac=True)
         self.assertEqual(str(cm.exception),
                          "constraint cZZ: no frame for item 'ZZ'; "
                          "Apple's order unknown (t)")
