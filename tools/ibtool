@@ -1187,25 +1187,20 @@ def _parse_color_resources(doc, path):
     return resources, named
 
 
-def compile_xib(path):
-    """Compile one xib to NIBArchive bytes. Mac files dispatch to ibmac."""
-    doc = ET.parse(path).getroot()
-    if doc.get("targetRuntime") == "MacOSX.Cocoa":
-        import ibmac
-        ibmac.set_target_module(TARGET_MODULE)
-        return ibmac.compile_xib(path)
+def _compile_xib_objects_element(doc, path):
+    """The <objects> element of an iOS xib; refuse anything else."""
     if doc.get("targetRuntime") != "iOS.CocoaTouch":
         raise XibError(f"{path}: targetRuntime {doc.get('targetRuntime')!r} is not iOS.CocoaTouch")
     objects = doc.find("objects")
     if objects is None:
         raise XibError(f"{path}: no <objects> element")
-    resources, named = _parse_color_resources(doc, path)
+    return objects
 
-    where = os.path.basename(path)
+
+def _compile_xib_top_objects(objects, path, where, b, resources, named):
+    """The xib object list in creation order: the placeholder proxies, then
+    the single top-level view, label or table view cell."""
     tops = []
-    b = Builder()
-    root = b.new("NSObject")
-    top_array = b.new("NSArray")
     main_obj = decode_order = outlets = None
     events = []
     pairs = []
@@ -1234,8 +1229,12 @@ def compile_xib(path):
             raise XibError(f"unsupported element <{el.tag}> ({w})")
     if main_obj is None:
         raise XibError(f"{path}: no top-level object")
-    objects_array = b.new("NSArray")
+    return tops, proxies, main_obj, decode_order, outlets, events, pairs
 
+
+def _compile_xib_connections(b, main_obj, outlets, events, proxies, where):
+    """The outlet and event connections array, or None when the xib has no
+    connections. The shared empty array is created right after it (golden)."""
     def resolve(dst):
         if dst in proxies:
             return proxies[dst]
@@ -1267,7 +1266,11 @@ def compile_xib(path):
         # no connections: all five root lists share one empty array
         empty_arr = b.new("NSArray")
         empty_arr.add("NSInlinedValue", *b.boolean(False))
-    conn = conn_array if conn_array is not None else empty_arr
+    return conn_array, empty_arr
+
+
+def _compile_xib_pairs(b, pairs, resources, named):
+    """The key-value pairs array from userDefinedRuntimeAttributes, or None."""
     pairs_array = None
     if pairs:
         pairs_array = b.new("NSArray")
@@ -1275,15 +1278,20 @@ def compile_xib(path):
         for el, tgt in pairs:
             for p in _uda_build(b, el, tgt, resources, named):
                 pairs_array.add("UINibEncoderEmptyKey", *b.ref(p))
+    return pairs_array
 
+
+def _compile_xib_assemble(b, root, top_array, objects_array, tops, main_obj,
+                          decode_order, conn, empty_arr, pairs_array):
+    """The five root lists and the version key, in Apple's key order.
+    UINibObjectsKey lists decode-order targets, not creation order (golden);
+    decode_order starts with the main object itself."""
     def fill_array(arr, items):
         arr.add("NSInlinedValue", *b.boolean(False))
         for item in items:
             arr.add("UINibEncoderEmptyKey", *b.ref(item))
 
     fill_array(top_array, tops + [main_obj])
-    # UINibObjectsKey lists decode-order targets, not creation order (golden);
-    # decode_order starts with the main object itself.
     fill_array(objects_array, tops + decode_order)
     root.add("UINibTopLevelObjectsKey", *b.ref(top_array))
     root.add("UINibObjectsKey", *b.ref(objects_array))
@@ -1293,6 +1301,32 @@ def compile_xib(path):
     root.add("UINibTraitStorageListsKey", *b.ref(empty_arr))
     root.add("UINibKeyValuePairsKey", *b.ref(pairs_array if pairs_array else empty_arr))
     root.add("IBUINibLNEVersionKey", *b.int8(1))
+
+
+def compile_xib(path):
+    """Compile one xib to NIBArchive bytes. Mac files dispatch to ibmac."""
+    doc = ET.parse(path).getroot()
+    if doc.get("targetRuntime") == "MacOSX.Cocoa":
+        import ibmac
+        ibmac.set_target_module(TARGET_MODULE)
+        return ibmac.compile_xib(path)
+    objects = _compile_xib_objects_element(doc, path)
+    resources, named = _parse_color_resources(doc, path)
+
+    where = os.path.basename(path)
+    b = Builder()
+    root = b.new("NSObject")
+    top_array = b.new("NSArray")
+    (tops, proxies, main_obj, decode_order,
+     outlets, events, pairs) = _compile_xib_top_objects(objects, path, where,
+                                                        b, resources, named)
+    objects_array = b.new("NSArray")
+    conn_array, empty_arr = _compile_xib_connections(b, main_obj, outlets,
+                                                     events, proxies, where)
+    conn = conn_array if conn_array is not None else empty_arr
+    pairs_array = _compile_xib_pairs(b, pairs, resources, named)
+    _compile_xib_assemble(b, root, top_array, objects_array, tops, main_obj,
+                          decode_order, conn, empty_arr, pairs_array)
     return finalize(b, root)
 
 
