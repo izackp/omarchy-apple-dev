@@ -4397,9 +4397,9 @@ VC_ORIGINAL_CLASS = {"viewController": "UIViewController",
                      "collectionViewController": "UICollectionViewController"}
 
 
-def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
-    """A storyboardIdentifier-carrying navigation controller scene
-    (oracle SettingsNavigationViewController.nib)."""
+def _nav_ident_shape(nav, where):
+    """The navigationBar element and its frame rect, once the scene's shape
+    checks have passed."""
     if set(nav.attrib) - NAV_IDENT_ATTRS:
         raise XibError(f"<navigationController> attributes {dict(nav.attrib)} not supported ({where})")
     bar_el = nav.find("navigationBar[@key='navigationBar']")
@@ -4413,17 +4413,23 @@ def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
     extra = {c.tag for c in nav} - {"navigationBar", "connections"}
     if extra or nav.find("connections/segue") is None:
         raise XibError(f"<navigationController> shape not supported ({where})")
-    sb = _Scene()
+    return bar_el, rect
+
+
+def _nav_ident_placeholders(b):
+    """The storyboard placeholders: the child, the files owner, the first
+    responder and the navigation placeholder."""
+    return (_proxy(b, "UIStoryboardPlaceholder"), _proxy(b, "IBFilesOwner"),
+            _proxy(b, "IBFirstResponder"), _proxy(b, "UIStoryboardPlaceholder"))
+
+
+def _nav_ident_swappers(sb, root_vc, root_view_nib, nav_sw, nav_ident, children, where):
+    """The navigation and view-controller swappers: the root view controller's
+    navigation item and its bar items, the external objects table, the child
+    view controllers and the class names, created in Apple's order.
+    Returns (view-controller swapper, navigation item, bar items, navigation
+    bar, its items array, its content hugging priority)."""
     b = sb.b
-    root_obj = b.new("NSObject")
-    top = b.new("NSArray")
-    sb_child = _proxy(b, "UIStoryboardPlaceholder")
-    fo = _proxy(b, "IBFilesOwner")
-    fr = _proxy(b, "IBFirstResponder")
-    sb_nav = _proxy(b, "UIStoryboardPlaceholder")
-    nav_sw = b.new("UIClassSwapper")
-    nav_ident = b.string(nav.get("storyboardIdentifier"))
-    children = b.new("NSMutableArray")
     vc_sw = b.new("UIClassSwapper")
     item, bar_items = _nav_item(sb, root_vc.find("navigationItem[@key='navigationItem']"), where)
     if any(_has_uda(el) for el, _obj in bar_items):
@@ -4449,8 +4455,7 @@ def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
     nav_sw.add("UIOriginalClassName", *b.ref(nav_cls))
     children.add("NSInlinedValue", *b.boolean(False))
     children.add("UINibEncoderEmptyKey", *b.ref(vc_sw))
-    item2 = item
-    vc_sw.add("UINavigationItem", *b.ref(item2))
+    vc_sw.add("UINavigationItem", *b.ref(item))
     vc_sw.add("UIExternalObjectsTableForViewLoading", *b.ref(ext))
     ext.add("UINibEncoderEmptyKey", *b.ref(upstream))
     ext.add("UINibEncoderEmptyKey", *b.ref(vc_sw))
@@ -4463,6 +4468,11 @@ def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
     vc_sw.add("UIOriginalClassName", *b.ref(orig_name))
     vcs.add("NSInlinedValue", *b.boolean(False))
     vcs.add("UINibEncoderEmptyKey", *b.ref(vc_sw))
+    return vc_sw, item, bar_items, bar, items, hugging
+
+
+def _nav_ident_bar(b, bar, items, hugging, item, nav_sw, bar_el, rect, where):
+    """The navigation bar's own keys and the array of bar items."""
     y = float(_attr(rect, "y", where))
     bar.add("UIBounds", *b.geom(0, 0, 0, 54))
     bar.add("UICenter", *b.geom(0, y + 27))
@@ -4482,7 +4492,12 @@ def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
     bar.add("UIBarPosition", *b.int8(2))
     bar.add("UIBarTranslucence", *b.int8(1))
     items.add("NSInlinedValue", *b.boolean(False))
-    items.add("UINibEncoderEmptyKey", *b.ref(item2))
+    items.add("UINibEncoderEmptyKey", *b.ref(item))
+
+
+def _nav_ident_connections(b, sb_child, fo, sb_nav, nav_sw, vc_sw, bar_items, root_vc, where):
+    """The connections array: the scene's three outlets, then one event
+    connection per bar button item action."""
     objarr = b.new("NSArray")
     conn_arr = b.new("NSArray")
     conn_arr.add("NSInlinedValue", *b.boolean(False))
@@ -4511,6 +4526,12 @@ def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
             e.add("UISource", *b.ref(button))
             e.add("UIDestination", *b.ref(vc_sw))
             conn_arr.add("UINibEncoderEmptyKey", *b.ref(e))
+    return objarr, conn_arr
+
+
+def _nav_ident_root(b, sb, root_obj, top, top_refs, obj_refs, objarr, conn_arr):
+    """The root object's nib keys: the top-level objects, the object list, the
+    connections and the four empty ones."""
     empty = sb.empty_array()
 
     def fill(arr, refs):
@@ -4518,9 +4539,8 @@ def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
         for r in refs:
             arr.add("UINibEncoderEmptyKey", *b.ref(r))
 
-    fill(top, [sb_child, fo, fr, sb_nav, nav_sw])
-    fill(objarr, [sb_child, fo, fr, sb_nav, nav_sw, bar, vc_sw, item2] +
-         [obj for _el, obj in bar_items])
+    fill(top, top_refs)
+    fill(objarr, obj_refs)
     root_obj.add("UINibTopLevelObjectsKey", *b.ref(top))
     root_obj.add("UINibObjectsKey", *b.ref(objarr))
     root_obj.add("UINibConnectionsKey", *b.ref(conn_arr))
@@ -4528,6 +4548,28 @@ def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
                 "UINibTraitStorageListsKey", "UINibKeyValuePairsKey"):
         root_obj.add(key, *b.ref(empty))
     root_obj.add("IBUINibLNEVersionKey", *b.int8(1))
+
+
+def _scene_nav_nib_ident(nav, root_vc, root_view_nib, where):
+    """A storyboardIdentifier-carrying navigation controller scene
+    (oracle SettingsNavigationViewController.nib)."""
+    bar_el, rect = _nav_ident_shape(nav, where)
+    sb = _Scene()
+    b = sb.b
+    root_obj = b.new("NSObject")
+    top = b.new("NSArray")
+    sb_child, fo, fr, sb_nav = _nav_ident_placeholders(b)
+    nav_sw = b.new("UIClassSwapper")
+    nav_ident = b.string(nav.get("storyboardIdentifier"))
+    children = b.new("NSMutableArray")
+    vc_sw, item, bar_items, bar, items, hugging = _nav_ident_swappers(
+        sb, root_vc, root_view_nib, nav_sw, nav_ident, children, where)
+    _nav_ident_bar(b, bar, items, hugging, item, nav_sw, bar_el, rect, where)
+    objarr, conn_arr = _nav_ident_connections(
+        b, sb_child, fo, sb_nav, nav_sw, vc_sw, bar_items, root_vc, where)
+    top_refs = [sb_child, fo, fr, sb_nav, nav_sw]
+    obj_refs = top_refs + [bar, vc_sw, item] + [obj for _el, obj in bar_items]
+    _nav_ident_root(b, sb, root_obj, top, top_refs, obj_refs, objarr, conn_arr)
     return finalize(b, root_obj), nav.get("storyboardIdentifier")
 
 
