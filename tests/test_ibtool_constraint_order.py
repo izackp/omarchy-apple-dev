@@ -83,14 +83,16 @@ class ConstraintOrder(unittest.TestCase):
     def test_mac_groups(self):
         """On macOS the guide-item constraints, the direct-subview constraint
         and the grandchild constraint (inside its ancestor's group) sort in
-        that order."""
+        that order. The grandchild's fractional group index keeps it before
+        bA, whose item is the next subview group."""
         cons = """
     <constraint firstItem="A" firstAttribute="top" secondItem="B" secondAttribute="top" id="cAB"/>
+    <constraint firstItem="B" firstAttribute="top" secondItem="A" secondAttribute="top" id="bA"/>
     <constraint firstItem="K" firstAttribute="top" secondItem="B" secondAttribute="top" id="cKB"/>
     <constraint firstItem="G" firstAttribute="width" secondItem="A" secondAttribute="width" id="gW"/>
     <constraint firstItem="G" firstAttribute="top" secondItem="A" secondAttribute="top" id="gT"/>"""
         self.assertEqual(order_of(SUBS_MAC, cons, mac=True),
-                         ["cAB", "gW", "gT", "cKB"])
+                         ["cAB", "gW", "gT", "cKB", "bA"])
 
     def test_mac_unknown_item_refused(self):
         """A macOS constraint naming an item with no frame names the
