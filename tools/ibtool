@@ -4396,18 +4396,21 @@ def _embedded_table_cell(cell_el, where, resources, named):
     return finalize(b, root)
 
 
-def _scene_table_view_nib(vc_el, view_el, where, resources, named, device=None):
-    """A table view controller scene's view nib: the table view with its data
-    (static sections or embedded prototype nibs) and all connections."""
-    b = Builder()
-    root = b.new("NSObject")
-    top_array = b.new("NSArray")
+def _scene_table_objects(b, vc_el, view_el, where, resources, named, device):
+    """The scene proxies, the table view with its data, and the view id map."""
     fo = _proxy(b, "IBFilesOwner")
     fr = _proxy(b, "IBFirstResponder")
     up = _proxy(b, "UpstreamPlaceholder-1")
     id_map = {}
     d = build_table_view(b, view_el, where, resources, vc_el.get("id"), named, id_map, device)
     d.id_map = id_map
+    return fo, fr, up, d
+
+
+def _scene_table_top_arrays(b, top_array, fo, fr, up, d):
+    """Fills the top-level objects array and returns the objects array: the
+    proxies and the table view first, then the data source; a static table
+    adds footer, sections, footer tail, cell swappers, subtrees, tails."""
     top_array.add("NSInlinedValue", *b.boolean(False))
     tops = [fo, fr, up, d.tv] + ([d.ds] if d.ds is not None else [])
     for item in tops:
@@ -4426,8 +4429,13 @@ def _scene_table_view_nib(vc_el, view_el, where, resources, named, device=None):
         decode += d.cons
     for item in decode:
         objarr.add("UINibEncoderEmptyKey", *b.ref(item))
-    # Connections: the synthesized staticDataSource first, then outlets sorted
-    # alphabetically (ties: sections forward, rows reversed), then actions.
+    return objarr
+
+
+def _scene_table_order_conns(vc_el, where, fo, up, d):
+    """The outlet connections, collected and put in app order: the synthesized
+    staticDataSource first, then outlets sorted alphabetically (ties: sections
+    forward, rows reversed), the view outlet last."""
     conns = []  # (label, src, dst, is_event, provenance or None)
     if d.ds is not None:
         conns.append(("staticDataSource", fo, d.ds, False, None))
@@ -4455,7 +4463,12 @@ def _scene_table_view_nib(vc_el, view_el, where, resources, named, device=None):
     tail = [c for c in conns if c[0] == "view"]
     mid = sorted([c for c in conns if c[0] not in ("staticDataSource", "view")
                   and not c[3]], key=conn_key)
-    outlets_only = head + mid + tail
+    return head + mid + tail
+
+
+def _scene_table_emit_conns(b, d, up, outlets_only):
+    """The connections array: the ordered outlets, then event connections
+    sorted by selector."""
     conn_arr = b.new("NSArray")
     conn_arr.add("NSInlinedValue", *b.boolean(False))
 
@@ -4475,6 +4488,12 @@ def _scene_table_view_nib(vc_el, view_el, where, resources, named, device=None):
         # UpstreamPlaceholder proxy
         dst_obj = d.id_map.get(dst_id) if isinstance(dst_id, str) else dst_id
         emit(sel, src, dst_obj if dst_obj is not None else up, True, mask)
+    return conn_arr
+
+
+def _scene_table_kv_array(b, d, resources, named):
+    """The empty-array stand-in and, when the nib has pairs, the key-value
+    array."""
     empty = b.new("NSArray")
     empty.add("NSInlinedValue", *b.boolean(False))
     kv_arr = None
@@ -4490,6 +4509,11 @@ def _scene_table_view_nib(vc_el, view_el, where, resources, named, device=None):
         pairs = cell_uda_pairs + b.kv_pair_flush()
         for kv in pairs:
             kv_arr.add("UINibEncoderEmptyKey", *b.ref(kv))
+    return empty, kv_arr
+
+
+def _scene_table_assemble(b, root, top_array, objarr, conn_arr, empty, kv_arr):
+    """The root dictionary keys and the finalized nib bytes."""
     root.add("UINibTopLevelObjectsKey", *b.ref(top_array))
     root.add("UINibObjectsKey", *b.ref(objarr))
     root.add("UINibConnectionsKey", *b.ref(conn_arr))
@@ -4499,6 +4523,20 @@ def _scene_table_view_nib(vc_el, view_el, where, resources, named, device=None):
     root.add("UINibKeyValuePairsKey", *b.ref(kv_arr if kv_arr is not None else empty))
     root.add("IBUINibLNEVersionKey", *b.int8(1))
     return finalize(b, root)
+
+
+def _scene_table_view_nib(vc_el, view_el, where, resources, named, device=None):
+    """A table view controller scene's view nib: the table view with its data
+    (static sections or embedded prototype nibs) and all connections."""
+    b = Builder()
+    root = b.new("NSObject")
+    top_array = b.new("NSArray")
+    fo, fr, up, d = _scene_table_objects(b, vc_el, view_el, where, resources, named, device)
+    objarr = _scene_table_top_arrays(b, top_array, fo, fr, up, d)
+    outlets_only = _scene_table_order_conns(vc_el, where, fo, up, d)
+    conn_arr = _scene_table_emit_conns(b, d, up, outlets_only)
+    empty, kv_arr = _scene_table_kv_array(b, d, resources, named)
+    return _scene_table_assemble(b, root, top_array, objarr, conn_arr, empty, kv_arr)
 
 
 NAV_IDENT_ATTRS = {"storyboardIdentifier", "id", "sceneMemberID"}
