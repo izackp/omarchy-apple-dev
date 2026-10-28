@@ -1302,12 +1302,13 @@ def upload(ipa):
 
 
 if __name__ == "__main__":
-    import cryptography
-    require_cryptography(cryptography.__version__)
     commands = {"stamp": stamp, "frameworks": frameworks, "identity": identity,
                 "given-identity": given_identity, "test-identity": test_identity,
                 "validate": validate, "upload": upload}
     if len(sys.argv) < 2 or sys.argv[1] not in commands:
         die("usage: asc.py stamp APP BUILD | frameworks APP | identity APP OUTDIR | given-identity APP OUTDIR"
             " | test-identity APP OUTDIR | validate IPA | upload IPA")
+    if sys.argv[1] in ("identity", "test-identity"):  # the two commands that reach not_valid_after_utc
+        import cryptography
+        require_cryptography(cryptography.__version__)
     commands[sys.argv[1]](*sys.argv[2:])
