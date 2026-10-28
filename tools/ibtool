@@ -4146,12 +4146,12 @@ def _table_view_static(b, tv_el, d, where, resources, named, id_map):
     ds.add("UITableSections", *b.ref(sections_arr))
     for si, sec_el in enumerate(tv_el.findall("sections/tableViewSection")):
         _table_view_section(b, sec_el, si, d, where, resources, named, id_map,
-                             sections_arr)
+                            sections_arr)
     d.ds = ds
 
 
 def _table_view_section(b, sec_el, si, d, where, resources, named, id_map,
-                         sections_arr):
+                        sections_arr):
     """One static section: its header title, its rows and their cells."""
     sec = b.new("UITableViewSection")
     d.sections.append(sec)
@@ -4171,7 +4171,7 @@ def _table_view_section(b, sec_el, si, d, where, resources, named, id_map,
         # row_key reversed: within a section Apple lists the last
         # row's connections first (oracle probes p1/p2/p3).
         _table_view_row(b, cell_el, si, len(cells) - 1 - ri, d, where, resources,
-                         named, id_map, rows_arr)
+                        named, id_map, rows_arr)
     sections_arr.add("UINibEncoderEmptyKey", *b.ref(sec))
 
 
