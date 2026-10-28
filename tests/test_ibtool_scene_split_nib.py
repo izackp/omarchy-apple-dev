@@ -104,6 +104,26 @@ class SceneSplitNib(unittest.TestCase):
         self.assertEqual(hashlib.sha256(data).hexdigest(),
                          "8488419da5a18415bdad3e52560a5a8269fddf475ad248ee2cb3ff838e4bbe62")
 
+    def test_no_storyboard_identifier_names_the_nib_after_the_element(self):
+        """Without a storyboardIdentifier the split nib is named
+        UISplitViewController-<element id> and no nib is named after the old
+        identifier."""
+        xml = self.variant('storyboardIdentifier="RootSplitViewController" extendedLayoutIncludesOpaqueBars',
+                           'extendedLayoutIncludesOpaqueBars')
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "NetNewsWire")
+            src.mkdir()
+            (src / "Variant.storyboard").write_text(xml)
+            out = Path(tmp, "out")
+            p = subprocess.run([sys.executable, str(TOOLS / "ibtool"), *FLAGS,
+                                "--compilation-directory", str(out),
+                                str(src / "Variant.storyboard")],
+                               capture_output=True, text=True, timeout=280)
+            names = sorted(f.name for f in (out / "Variant.storyboardc").glob("*.nib"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("UISplitViewController-AJQ-jq-uMa.nib", names)
+        self.assertNotIn("RootSplitViewController.nib", names)
+
 
 if __name__ == "__main__":
     unittest.main()

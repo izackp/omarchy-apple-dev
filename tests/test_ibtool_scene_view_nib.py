@@ -197,6 +197,28 @@ class SceneViewNibEvents(unittest.TestCase):
             labels.append(a.render(ov["UILabel"]).split(" -> ")[0])
         self.assertEqual(labels, ["string 'delegate'", "string 'view'"])
 
+    def test_event_connection_comes_after_the_outlets(self):
+        """In UINibConnectionsKey the outlet connections (sorted by label, then
+        the view outlet) come first and the event connections last, in selector
+        order."""
+        data = self.scene([("zoom:", 64, None, "vc1"), ("tapped:", 64, None, "vc1")])
+        a = nibarchive.parse(data)
+        root = next(o for o in a.objects
+                    if any(a.key(v.key_idx) == "UINibConnectionsKey" for v in a.object_values(o)))
+        arr_idx = next(v.payload for v in a.object_values(root)
+                       if a.key(v.key_idx) == "UINibConnectionsKey")
+        order = []
+        for v in a.object_values(a.objects[arr_idx]):
+            if a.key(v.key_idx) != "UINibEncoderEmptyKey":
+                continue
+            item = v.payload
+            label = {a.key(x.key_idx): x for x in a.object_values(a.objects[item])}["UILabel"]
+            order.append((a.object_class(item), a.render(label).split(" -> ")[0]))
+        self.assertEqual(order, [("UIRuntimeOutletConnection", "string 'delegate'"),
+                                 ("UIRuntimeOutletConnection", "string 'view'"),
+                                 ("UIRuntimeEventConnection", "string 'tapped:'"),
+                                 ("UIRuntimeEventConnection", "string 'zoom:'")])
+
 
 if __name__ == "__main__":
     unittest.main()
