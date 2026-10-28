@@ -2707,36 +2707,10 @@ def _legacy_layout_guide(b, g_el, view, where):
     return g, cons
 
 
-def _scene_element(sb, el, where, resources, named, id_map, state):
-    """One scene element -> (obj, own_constraint_group, events)."""
-    state.setdefault("id_map", {}).update({k: v for k, v in id_map.items()})
+def _scene_element_view_obj(sb, el, where, resources, named, id_map, state, cls):
+    """The view object of a plain-view scene element: bounds, subviews, kids,
+    legacy layout guides, background color. -> (obj, legacy constraint list)"""
     b = sb.b
-    tag = el.tag
-    cls = el.get("customClass")
-    if tag == "label":
-        kid, lgroup = build_label(b, el, where, resources, named)
-        if el.get("id"):
-            id_map[el.get("id")] = kid
-        return kid, lgroup, []
-    if tag == "imageView":
-        kid, group = _scene_image_view(sb, el, where, resources, named, id_map)
-        return kid, group, []
-    if tag == "slider":
-        return build_slider(b, el, where, id_map, named), [], []
-    if tag == "button":
-        kid, group, events = _scene_button(sb, el, where, resources, named, id_map)
-        if el.get("id"):
-            id_map[el.get("id")] = kid
-        return kid, group, events
-    if tag == "visualEffectView":
-        kid, group = _scene_visual_effect_view(sb, el, where, id_map, state)
-        return kid, group, []
-    if tag == "scrollView":
-        return _scene_scroll_view(sb, el, where, id_map, state)
-    if tag == "collectionView":
-        return _scene_collection_view(sb, el, where, resources, named, id_map, state)
-    if tag != "view":
-        raise XibError(f"unsupported subview <{tag}> ({where})")
     (bx, by, bw, bh), (cx, cy) = _bounds_center(el)
     o = b.new("UIClassSwapper" if cls else "UIView")
     if el.get("id"):
@@ -2771,6 +2745,12 @@ def _scene_element(sb, el, where, resources, named, id_map, state):
         o.values.insert(slot if slot is not None else 2,
                         ("UIBackgroundColor", N.Value(0, N.OBJREF, cobj.idx)))
     _view_common(b, el, o, where, resources, named, slot)
+    return o, legacy_cons
+
+
+def _scene_element_view_tails(b, el, o, id_map, where, state, cls, legacy_cons):
+    """Autolayout constraints, layout guides and the trailing view keys.
+    -> the view's own constraint group."""
     group = []
     gid_el = el.find("viewLayoutGuide[@key='safeArea']")
     cache = []
@@ -2815,6 +2795,43 @@ def _scene_element(sb, el, where, resources, named, id_map, state):
     if cls:
         o.add("UIClassName", *b.ref(b.string(_swift_class(el))))
         o.add("UIOriginalClassName", *b.ref(b.string("UIView")))
+    return group
+
+
+def _scene_element(sb, el, where, resources, named, id_map, state):
+    """One scene element -> (obj, own_constraint_group, events)."""
+    state.setdefault("id_map", {}).update({k: v for k, v in id_map.items()})
+    b = sb.b
+    tag = el.tag
+    cls = el.get("customClass")
+    if tag == "label":
+        kid, lgroup = build_label(b, el, where, resources, named)
+        if el.get("id"):
+            id_map[el.get("id")] = kid
+        return kid, lgroup, []
+    if tag == "imageView":
+        kid, group = _scene_image_view(sb, el, where, resources, named, id_map)
+        return kid, group, []
+    if tag == "slider":
+        return build_slider(b, el, where, id_map, named), [], []
+    if tag == "button":
+        kid, group, events = _scene_button(sb, el, where, resources, named, id_map)
+        if el.get("id"):
+            id_map[el.get("id")] = kid
+        return kid, group, events
+    if tag == "visualEffectView":
+        kid, group = _scene_visual_effect_view(sb, el, where, id_map, state)
+        return kid, group, []
+    if tag == "scrollView":
+        return _scene_scroll_view(sb, el, where, id_map, state)
+    if tag == "collectionView":
+        return _scene_collection_view(sb, el, where, resources, named, id_map, state)
+    if tag != "view":
+        raise XibError(f"unsupported subview <{tag}> ({where})")
+    o, legacy_cons = _scene_element_view_obj(sb, el, where, resources, named,
+                                             id_map, state, cls)
+    group = _scene_element_view_tails(b, el, o, id_map, where, state, cls,
+                                      legacy_cons)
     return o, group, []
 
 
