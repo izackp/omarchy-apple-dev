@@ -5,7 +5,7 @@ tests/asc/golden-validate.py runs validate on an unsigned app with a stub rcodes
 profile, seal and appex checks. This test runs the signing steps of ship.sh (test identity, rcodesign on the
 extension and then the app) on a synthetic app, packages the .ipa and runs validate on it. The app is a
 hand-made thin arm64 Mach-O (no Apple-derived data). Skips with exit 0 when rcodesign or the cryptography
-module is missing, as the simview tests skip without a Swift compiler.
+module (version 42 or later) is missing, as the simview tests skip without a Swift compiler.
 
 The Mach-O has no asset catalog, so validate reports the two Assets.car lines as FAIL on every row; the rows
 ignore those two and check the rest.
@@ -51,9 +51,12 @@ def skip(why):
 if shutil.which("rcodesign") is None:
     skip("rcodesign is not on PATH")
 try:
-    import cryptography  # noqa: F401
+    import cryptography
 except ImportError:
     skip("tools/asc.py needs the cryptography module")
+# tools/asc.py reads Certificate.not_valid_after_utc, which cryptography added in 42.
+if tuple(int(p) for p in cryptography.__version__.split(".")[:2]) < (42, 0):
+    skip(f"tools/asc.py needs cryptography 42 or later; this is {cryptography.__version__}")
 
 
 def segment(name, vmaddr, vmsize, fileoff, filesize, prot, sections=b"", nsects=0):
