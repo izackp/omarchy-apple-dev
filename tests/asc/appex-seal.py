@@ -55,7 +55,7 @@ try:
 except ImportError:
     skip("tools/asc.py needs the cryptography module")
 # tools/asc.py reads Certificate.not_valid_after_utc, which cryptography added in 42.
-if tuple(int(p) for p in cryptography.__version__.split(".")[:2]) < (42, 0):
+if int(cryptography.__version__.split(".")[0]) < 42:
     skip(f"tools/asc.py needs cryptography 42 or later; this is {cryptography.__version__}")
 
 

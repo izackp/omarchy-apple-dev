@@ -20,6 +20,7 @@ adds TestFlight and the App Store.
 | Swift | 6.4.1 in the latest fresh-install check | AUR `swift-bin` |
 | xtool | 1.23.0 + 10 fixes (fork pin `f300489`; xtool-org/xtool #290-#293, #295, #302 still open upstream) | built from source by the installer |
 | pymobiledevice3 | latest from PyPI at install time | venv |
+| cryptography | 42 or later; a dependency of pymobiledevice3, in the same venv. `tools/asc.py` stops with a message naming the version if it is older | venv |
 | LLDB | bundled with the installed Swift toolchain | `swift-bin` |
 | iOS SDK | iPhoneOS 27.0 | Xcode 27.0 (full mode); in no-Xcode mode, link stubs cut from a connected iPhone or Apple's public iOS update |
 

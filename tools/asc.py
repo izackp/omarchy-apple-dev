@@ -56,6 +56,16 @@ def die(msg):
     sys.exit(f"asc.py: {msg}")
 
 
+MIN_CRYPTOGRAPHY = 42  # Certificate.not_valid_after_utc, which certificate() and make_test_profile() read, is new in 42.0.0
+
+
+def require_cryptography(version):
+    """Stop with a plain message when the cryptography module is older than asc.py needs."""
+    if int(version.split(".")[0]) < MIN_CRYPTOGRAPHY:
+        die(f"needs cryptography {MIN_CRYPTOGRAPHY} or later (Certificate.not_valid_after_utc); this python has "
+            f"{version}. Upgrade it: {sys.executable} -m pip install -U cryptography")
+
+
 def b64url(data):
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -1292,6 +1302,8 @@ def upload(ipa):
 
 
 if __name__ == "__main__":
+    import cryptography
+    require_cryptography(cryptography.__version__)
     commands = {"stamp": stamp, "frameworks": frameworks, "identity": identity,
                 "given-identity": given_identity, "test-identity": test_identity,
                 "validate": validate, "upload": upload}
