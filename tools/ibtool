@@ -1502,8 +1502,8 @@ MAC_OTHER_ORDER = ("centerX", "trailing", "leading", "centerY", "bottom", "top",
 RELATION_ORDER = {"lessThanOrEqual": 0, "greaterThanOrEqual": 1, "equal": 2}
 
 
-def _constraint_order(view_el, cons, where, mac=False):
-    owner = view_el.get("id")
+def _constraint_order_parents(view_el, owner):
+    """Map every descendant id to its nearest ancestor id."""
     par = {}
     def _walk_par(e, aid):
         for ch in e:
@@ -1514,31 +1514,11 @@ def _constraint_order(view_el, cons, where, mac=False):
             else:
                 _walk_par(ch, aid)
     _walk_par(view_el, owner)
-    sidx = {}
-    def _walk_sidx(e):
-        subs = e.find("subviews")
-        if subs is not None:
-            for i, ch in enumerate(subs):
-                if ch.get("id"):
-                    sidx[ch.get("id")] = i
-                _walk_sidx(ch)
-    _walk_sidx(view_el)
+    return par
 
-    def _gidx(item_id):
-        """Group index; a grandchild sorts inside its direct-subview
-        ancestor's group, after that ancestor's own constraints (golden
-        SidebarView: Mnm to iyL is the last root constraint)."""
-        if item_id in index:
-            return index[item_id]
-        if item_id in guides or item_id is None or item_id == owner:
-            return -1
-        anc, depth = item_id, 0
-        while anc is not None and anc not in index:
-            anc = par.get(anc)
-            depth += 1
-        if anc is None:
-            raise XibError(f"no frame for item {item_id!r} ({where})")
-        return index[anc] + depth / 10
+
+def _constraint_order_frames(view_el):
+    """Direct-subview order, their frame origins, and view layout guides."""
     guides = [g.get("id") for g in view_el.findall("viewLayoutGuide")]
     subs = view_el.find("subviews")
     index, origin = {}, {}
@@ -1550,6 +1530,78 @@ def _constraint_order(view_el, cons, where, mac=False):
         elif sv.tag in FRAMELESS_TAGS:
             # no design-time frame: Apple places it at the origin (_frame)
             origin[sv.get("id")] = FRAMELESS_RECT[:2]
+    return guides, index, origin
+
+
+def _constraint_order_group_index(item_id, index, guides, par, owner, where):
+    """Group index; a grandchild sorts inside its direct-subview
+    ancestor's group, after that ancestor's own constraints (golden
+    SidebarView: Mnm to iyL is the last root constraint)."""
+    if item_id in index:
+        return index[item_id]
+    if item_id in guides or item_id is None or item_id == owner:
+        return -1
+    anc, depth = item_id, 0
+    while anc is not None and anc not in index:
+        anc = par.get(anc)
+        depth += 1
+    if anc is None:
+        raise XibError(f"no frame for item {item_id!r} ({where})")
+    return index[anc] + depth / 10
+
+
+def _constraint_order_placement(c, first, second, fa, sa, guide_item, owner,
+                                guides, index, origin, par, where, mac):
+    """Which item group a constraint sorts in: the item the group comes
+    from, the attribute that orders inside the group, the other side, and
+    the group key. The macOS guide-firstItem case returns in the caller
+    before this runs."""
+    if guide_item:
+        # iOS: guide-firstItem constraints precede the origin-view group;
+        # guide-secondItem constraints stay with their view item's group.
+        # Ties inside the guide group use the item-side attribute and
+        # document order (FeedCell bottom constraints).
+        item, attr, other, oattr = first, sa, second, sa
+        gkey = ((1, 0.0, 0.0) if origin.get(second) == (0.0, 0.0)
+                else (0, 0.0, 0.0))
+    else:
+        if second is None:
+            item, attr, other, oattr = first, fa, None, None
+        elif first == owner:
+            # owner-first: sort by the other side's attribute with the margin
+            # wrapper unwrapped (syncContent-labelBottom bottomMargin/bottom).
+            item, attr, other, oattr = second, MARGIN_BASE.get(sa, sa), first, fa
+        else:
+            item, attr, other, oattr = first, fa, second, sa
+        if item in guides:
+            gkey = (1, 0.0, 0.0)
+        elif item in origin:
+            x, y = origin[item]
+            gkey = (1, math.hypot(x, y), x) if not mac else (1, index.get(item, -1), 0)
+        elif item == owner and other is None:
+            gkey = (1, 0.0, 0.0) if not mac else (1, -1, 0)
+        elif mac:
+            # grandchild: group by its nearest direct-subview ancestor,
+            # after that ancestor's own constraints (probe golden
+            # SidebarView: Mnm to iyL sorts after the HZs group)
+            anc, depth = item, 0
+            while anc is not None and anc not in index:
+                anc = par.get(anc)
+                depth += 1
+            if anc is None:
+                raise XibError(f"constraint {c.get('id')}: no frame for item "
+                               f"{item!r}; Apple's order unknown ({where})")
+            gkey = (1, index[anc], depth)
+        else:
+            raise XibError(f"constraint {c.get('id')}: no frame for item {item!r}; "
+                           f"Apple's order unknown ({where})")
+    return item, attr, other, oattr, gkey
+
+
+def _constraint_order(view_el, cons, where, mac=False):
+    owner = view_el.get("id")
+    par = _constraint_order_parents(view_el, owner)
+    guides, index, origin = _constraint_order_frames(view_el)
 
     def key(c):
         first, second = c.get("firstItem", owner), c.get("secondItem")
@@ -1561,55 +1613,9 @@ def _constraint_order(view_el, cons, where, mac=False):
             rel = RELATION_ORDER[c.get("relation", "equal")]
             return (index.get(item, -1), 2, OWNER_ORDER.index(attr), rel,
                     index.get(item, -1))
-        if guide_item and not mac:
-            # iOS: guide-firstItem constraints precede the origin-view group;
-            # guide-secondItem constraints stay with their view item's group.
-            # Ties inside the guide group use the item-side attribute and
-            # document order (FeedCell bottom constraints).
-            item, attr, other, oattr = first, sa, second, sa
-            gkey = ((1, 0.0, 0.0) if origin.get(second) == (0.0, 0.0)
-                    else (0, 0.0, 0.0))
-        elif guide_item:
-            # macOS (probe DetailView 5vz/pbD): the guide-firstItem constraint
-            # sorts inside its second item's group, after the other-branch
-            # constraints, by the second item's side attribute.
-            item, attr, other, oattr = second, sa, first, fa
-            x, y = origin.get(item, (0.0, 0.0))
-            gkey = (1, math.hypot(x, y), x)
-            rel = RELATION_ORDER[c.get("relation", "equal")]
-            return gkey + (2, OWNER_ORDER.index(MARGIN_BASE.get(attr, attr)),
-                           rel, index.get(item, -1))
-        else:
-            if second is None:
-                item, attr, other, oattr = first, fa, None, None
-            elif first == owner:
-                # owner-first: sort by the other side's attribute with the margin
-                # wrapper unwrapped (syncContent-labelBottom bottomMargin/bottom).
-                item, attr, other, oattr = second, MARGIN_BASE.get(sa, sa), first, fa
-            else:
-                item, attr, other, oattr = first, fa, second, sa
-            if item in guides:
-                gkey = (1, 0.0, 0.0)
-            elif item in origin:
-                x, y = origin[item]
-                gkey = (1, math.hypot(x, y), x) if not mac else (1, index.get(item, -1), 0)
-            elif item == owner and other is None:
-                gkey = (1, 0.0, 0.0) if not mac else (1, -1, 0)
-            elif mac:
-                # grandchild: group by its nearest direct-subview ancestor,
-                # after that ancestor's own constraints (probe golden
-                # SidebarView: Mnm to iyL sorts after the HZs group)
-                anc, depth = item, 0
-                while anc is not None and anc not in index:
-                    anc = par.get(anc)
-                    depth += 1
-                if anc is None:
-                    raise XibError(f"constraint {c.get('id')}: no frame for item "
-                                   f"{item!r}; Apple's order unknown ({where})")
-                gkey = (1, index[anc], depth)
-            else:
-                raise XibError(f"constraint {c.get('id')}: no frame for item {item!r}; "
-                               f"Apple's order unknown ({where})")
+        item, attr, other, oattr, gkey = _constraint_order_placement(
+            c, first, second, fa, sa, guide_item, owner, guides, index,
+            origin, par, where, mac)
         rel = RELATION_ORDER[c.get("relation", "equal")]
         # A constraint to the owner view on another attribute sorts with the
         # owner constraints too, by the item's attribute (iOS golden HelloWorld
@@ -1622,7 +1628,8 @@ def _constraint_order(view_el, cons, where, mac=False):
             if mac:
                 # relation ties break before the attribute (probe RenameSheet:
                 # the >= leading constraint precedes the equal trailing one)
-                return (_gidx(item), 0, rel, OWNER_ORDER.index(attr), 0)
+                return (_constraint_order_group_index(item, index, guides, par, owner, where),
+                        0, rel, OWNER_ORDER.index(attr), 0)
             return gkey + (0, OWNER_ORDER.index(attr), 0, 0)
         order = MAC_OTHER_ORDER if mac else OTHER_ORDER
         if attr not in order or (oattr is not None and oattr not in order):
@@ -1630,7 +1637,8 @@ def _constraint_order(view_el, cons, where, mac=False):
                            f"Apple's order unknown ({where})")
         other_idx = 0 if guide_item else index.get(other, -1)
         if mac:
-            return (_gidx(item), 1, order.index(attr), rel, other_idx)
+            return (_constraint_order_group_index(item, index, guides, par, owner, where),
+                    1, order.index(attr), rel, other_idx)
         return gkey + (1, OTHER_ORDER.index(attr), rel, other_idx)
 
     return sorted(cons, key=key)
