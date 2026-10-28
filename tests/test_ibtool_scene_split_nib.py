@@ -93,5 +93,17 @@ class SceneSplitNib(unittest.TestCase):
                          "56b5f5f0613c0e8f72da38ad23553cb9ff85e6d7a979ab3758afa5bfc4ae2e31")
 
 
+    def test_no_custom_class(self):
+        """Without customClass the split stores the plain UISplitViewController
+        class name. The hash is characterization of our output, not Apple's."""
+        old = ('customClass="RootSplitViewController" customModule="NetNewsWire"'
+               ' customModuleProvider="target"')
+        rc, err, data = compile_variant(self.variant(old, ""))
+        self.assertEqual(rc, 0, err)
+        self.assertIsNotNone(data)
+        self.assertEqual(hashlib.sha256(data).hexdigest(),
+                         "8488419da5a18415bdad3e52560a5a8269fddf475ad248ee2cb3ff838e4bbe62")
+
+
 if __name__ == "__main__":
     unittest.main()
