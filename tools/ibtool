@@ -3883,9 +3883,10 @@ NAV_ATTRS = {"automaticallyAdjustsScrollViewInsets", "id", "sceneMemberID"}
 NAV_BAR_ATTRS = {"key", "contentMode", "id"}
 
 
-def _scene_nav_nib(nav, root, root_view_nib, where):
-    """A UINavigationController scene with its rootViewController, object for object as Apple's
-    ibtool 27.0 writes Mastodon's MainInterface.storyboard (tests/ibtool/golden)."""
+def _nav_plain_shape(nav, root, where):
+    """The scene's shape checks: the plain navigation bar with its frame and
+    autoresizing mask, and the plain root navigation item. Returns the bar's
+    frame rect."""
     if set(nav.attrib) - NAV_ATTRS or nav.get("automaticallyAdjustsScrollViewInsets") != "NO":
         raise XibError(f"<navigationController> attributes {dict(nav.attrib)} not supported ({where})")
     bar_el = nav.find("navigationBar[@key='navigationBar']")
@@ -3900,8 +3901,13 @@ def _scene_nav_nib(nav, root, root_view_nib, where):
     if extra or nav.find("toolbarItems/*") is not None or item_el is None or len(item_el) or \
             set(item_el.attrib) != {"key", "id"}:
         raise XibError(f"<navigationController>/root navigationItem shape not supported ({where})")
-    nav_name = f"UINavigationController-{nav.get('id')}"
-    b = Builder()
+    return rect
+
+
+def _nav_plain_placeholders(b):
+    """The root object, the top-level array, the storyboard placeholders, the
+    navigation proxy and swapper and the child-controller array, in creation
+    order."""
     root_obj = b.new("NSObject")
     top = b.new("NSArray")
     sb_child = _proxy(b, "UIStoryboardPlaceholder")
@@ -3911,6 +3917,14 @@ def _scene_nav_nib(nav, root, root_view_nib, where):
     sb_nav.add("UIProxiedObjectIdentifier", *b.ref(b.string("UIStoryboardPlaceholder")))
     nav_sw = b.new("UIClassSwapper")
     children = b.new("NSMutableArray")
+    return root_obj, top, sb_child, fo, fr, sb_nav, nav_sw, children
+
+
+def _nav_plain_swappers(b, root, root_view_nib):
+    """The objects the two class swappers refer to, in creation order: the
+    view-controller swapper, the navigation item, the empty array, the
+    external objects table, the class-name strings, the view-controller list,
+    the navigation bar, its content hugging priority and its items array."""
     vc_sw = b.new("UIClassSwapper")
     item = b.new("UINavigationItem")
     empty = b.new("NSArray")
@@ -3923,6 +3937,12 @@ def _scene_nav_nib(nav, root, root_view_nib, where):
     hugging = b.string("{250, 250}")
     items = b.new("NSMutableArray")
     nav_cls = b.string("UINavigationController")
+    return vc_sw, item, empty, ext, nib_name, cls_name, orig_name, vcs, bar, hugging, items, nav_cls
+
+
+def _nav_plain_connection_objects(b):
+    """The object and connection arrays and the three outlet connections with
+    their label strings, in creation order."""
     objarr = b.new("NSArray")
     conn_arr = b.new("NSArray")
     c1 = b.new("UIRuntimeOutletConnection")
@@ -3930,6 +3950,53 @@ def _scene_nav_nib(nav, root, root_view_nib, where):
     c2 = b.new("UIRuntimeOutletConnection")
     c3 = b.new("UIRuntimeOutletConnection")
     scene_vc = b.string("sceneViewController")
+    return objarr, conn_arr, c1, c2, c3, storyboard, scene_vc
+
+
+def _nav_plain_bar(b, fill, bar, items, hugging, item, nav_sw, rect, where):
+    """The navigation bar's own keys and its items array."""
+    # Apple ignores the XML width/height: zero width, 54 pt tall, at the frame's y.
+    y = float(_attr(rect, "y", where))
+    bar.add("UIBounds", *b.geom(0, 0, 0, 54))
+    bar.add("UICenter", *b.geom(0, y + 27))
+    bar.add("UIDeepDrawRect", *b.boolean(False))
+    bar.add("UIAutoresizeSubviews", *b.boolean(False))
+    bar.add("UIAutoresizingMask", *b.int8(2))
+    bar.add("UIViewContentHuggingPriority", *b.ref(hugging))
+    bar.add("UIViewLayoutMargins", *b.geom(0, 0, 0, 0))
+    bar.add("UIViewLayoutMarginsAreDirectional", *b.boolean(False))
+    bar.add("UIViewSemanticContentAttribute", *b.int8(0))
+    bar.add("UIViewLargeContentStoredProperties", N.NIL, None)
+    bar.add("UIIsLocked", *b.boolean(False))
+    bar.add("UIItems", *b.ref(items))
+    bar.add("UIDelegate", *b.ref(nav_sw))
+    bar.add("UIBarPosition", *b.int8(2))
+    bar.add("UIBarTranslucence", *b.int8(1))
+    fill(items, [item])
+
+
+def _nav_plain_root(b, root_obj, top, objarr, conn_arr, empty):
+    """The root object's nib keys: the top-level objects, the object list, the
+    connections, the four empty ones and the format version."""
+    root_obj.add("UINibTopLevelObjectsKey", *b.ref(top))
+    root_obj.add("UINibObjectsKey", *b.ref(objarr))
+    root_obj.add("UINibConnectionsKey", *b.ref(conn_arr))
+    for key in ("UINibVisibleWindowsKey", "UINibAccessibilityConfigurationsKey",
+                "UINibTraitStorageListsKey", "UINibKeyValuePairsKey"):
+        root_obj.add(key, *b.ref(empty))
+    root_obj.add("IBUINibLNEVersionKey", *b.int8(1))
+
+
+def _scene_nav_nib(nav, root, root_view_nib, where):
+    """A UINavigationController scene with its rootViewController, object for object as Apple's
+    ibtool 27.0 writes Mastodon's MainInterface.storyboard (tests/ibtool/golden)."""
+    rect = _nav_plain_shape(nav, root, where)
+    nav_name = f"UINavigationController-{nav.get('id')}"
+    b = Builder()
+    root_obj, top, sb_child, fo, fr, sb_nav, nav_sw, children = _nav_plain_placeholders(b)
+    vc_sw, item, empty, ext, nib_name, cls_name, orig_name, vcs, bar, hugging, items, nav_cls = \
+        _nav_plain_swappers(b, root, root_view_nib)
+    objarr, conn_arr, c1, c2, c3, storyboard, scene_vc = _nav_plain_connection_objects(b)
 
     def fill(arr, refs):
         arr.add("NSInlinedValue", *b.boolean(False))
@@ -3955,24 +4022,7 @@ def _scene_nav_nib(nav, root, root_view_nib, where):
     fill(empty, [])
     ext.add("NSInlinedValue", *b.boolean(False))
     fill(vcs, [vc_sw])
-    # Apple ignores the XML width/height: zero width, 54 pt tall, at the frame's y.
-    y = float(_attr(rect, "y", where))
-    bar.add("UIBounds", *b.geom(0, 0, 0, 54))
-    bar.add("UICenter", *b.geom(0, y + 27))
-    bar.add("UIDeepDrawRect", *b.boolean(False))
-    bar.add("UIAutoresizeSubviews", *b.boolean(False))
-    bar.add("UIAutoresizingMask", *b.int8(2))
-    bar.add("UIViewContentHuggingPriority", *b.ref(hugging))
-    bar.add("UIViewLayoutMargins", *b.geom(0, 0, 0, 0))
-    bar.add("UIViewLayoutMarginsAreDirectional", *b.boolean(False))
-    bar.add("UIViewSemanticContentAttribute", *b.int8(0))
-    bar.add("UIViewLargeContentStoredProperties", N.NIL, None)
-    bar.add("UIIsLocked", *b.boolean(False))
-    bar.add("UIItems", *b.ref(items))
-    bar.add("UIDelegate", *b.ref(nav_sw))
-    bar.add("UIBarPosition", *b.int8(2))
-    bar.add("UIBarTranslucence", *b.int8(1))
-    fill(items, [item])
+    _nav_plain_bar(b, fill, bar, items, hugging, item, nav_sw, rect, where)
     fill(top, [sb_child, fo, fr, sb_nav, nav_sw])
     fill(objarr, [sb_child, fo, fr, sb_nav, nav_sw, bar, vc_sw, item])
     fill(conn_arr, [c1, c2, c3])
@@ -3981,13 +4031,7 @@ def _scene_nav_nib(nav, root, root_view_nib, where):
         c.add("UILabel", *b.ref(label))
         c.add("UISource", *b.ref(src))
         c.add("UIDestination", *b.ref(dst))
-    root_obj.add("UINibTopLevelObjectsKey", *b.ref(top))
-    root_obj.add("UINibObjectsKey", *b.ref(objarr))
-    root_obj.add("UINibConnectionsKey", *b.ref(conn_arr))
-    for key in ("UINibVisibleWindowsKey", "UINibAccessibilityConfigurationsKey",
-                "UINibTraitStorageListsKey", "UINibKeyValuePairsKey"):
-        root_obj.add(key, *b.ref(empty))
-    root_obj.add("IBUINibLNEVersionKey", *b.int8(1))
+    _nav_plain_root(b, root_obj, top, objarr, conn_arr, empty)
     return finalize(b, root_obj), nav_name
 
 
