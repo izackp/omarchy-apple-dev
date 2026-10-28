@@ -4063,9 +4063,8 @@ class _ViewData:
 NAV_BAR_CENTER_Y = None  # set by compile_storyboard when the scene sits in a nav
 
 
-def build_table_view(b, tv_el, where, resources, vc_id, named=None, id_map=None, device=None):
-    """<tableView key="view">, static or prototypes. Returns the UITableView plus
-    everything the scene nib needs (sections, decode order, raw connections)."""
+def _table_view_checks(tv_el, where):
+    """The table view's own attributes and children; returns its data mode."""
     unknown = set(tv_el.attrib) - TABLE_ATTRS
     if unknown:
         raise XibError(f"<tableView> has unsupported attribute(s) {sorted(unknown)} ({where})")
@@ -4078,8 +4077,11 @@ def build_table_view(b, tv_el, where, resources, vc_id, named=None, id_map=None,
         if extra.tag not in ("rect", "autoresizingMask", "color", "sections",
                              "prototypes", "connections", "view"):
             raise XibError(f"<tableView> has unsupported <{extra.tag}> ({where})")
-    d = _ViewData()
-    d.id_map = id_map
+    return mode
+
+
+def _table_view_object(b, tv_el, where, resources, device):
+    """The UITableView object: its scroll-view base keys, then the table's own."""
     o = b.new("UITableView")
     _scroll_view_base(b, o, tv_el, where, resources, device)
     if tv_el.find("view[@key='tableFooterView']") is None and tv_el.find("color[@key='backgroundColor']") is None:
@@ -4100,6 +4102,146 @@ def build_table_view(b, tv_el, where, resources, vc_id, named=None, id_map=None,
     o.add("UIFillerRowHeight", *b.float64(0.0))
     o.add("UISectionHeaderTopPadding", *b.float64(-1.0))
     o.add("UIInsetsContentViewsToSafeArea", *b.boolean(False))
+    return o
+
+
+def _table_view_footer(b, o, tv_el, d, where, resources, named, id_map):
+    """The table's footer view: its subtree, its background and its actions."""
+    footer_el = tv_el.find("view[@key='tableFooterView']")
+    if footer_el is None:
+        return
+    # creation order (app gold): the footer subtree encodes right after the
+    # tableView's UISubviews array, BEFORE the data source and sections
+    subs_arr = b.new("NSMutableArray")
+    subs_arr.add("NSInlinedValue", *b.boolean(False))
+    fobj, fdecode, fevents, _fpairs = build_view(b, footer_el, where, resources, named, top=False, id_map=id_map)
+    id_map[footer_el.get("id")] = fobj
+    if NAV_BAR_CENTER_Y is not None:
+        # Apple re-anchors the static-table footer under the navigation bar
+        # (app gold 1m3: center = (w/2, nav-bar center))
+        fx, fy, fw, fh = _frame(footer_el)
+        fobj.values[1] = ("UICenter", N.Value(0, N.DATA,
+                           b"\x07" + struct.pack("<2d", fw / 2, NAV_BAR_CENTER_Y)))
+    subs_arr.add("UINibEncoderEmptyKey", *b.ref(fobj))
+    d.footer = fobj
+    # scene-rule tail: own constraints first, then the subview subtree
+    d.footer_tail = [x for x in fdecode[1:] if getattr(x, "cls", None) == "NSLayoutConstraint"] \
+        + [x for x in fdecode[1:] if getattr(x, "cls", None) != "NSLayoutConstraint"]
+    o.values.insert(2, ("UISubviews", N.Value(0, N.OBJREF, subs_arr.idx)))
+    o.values.insert(3, ("UIBackgroundColor",
+                        N.Value(0, N.OBJREF,
+                                build_color(b, "systemGroupedBackgroundColor", where, resources).idx)))
+    o.add("UITableFooterView", *b.ref(fobj))
+    for sel, dst_id, ev, src in fevents:
+        if ev not in EVENT_MASKS:
+            raise XibError(f"footer action eventType {ev!r} not supported ({where})")
+        d.events.append((sel, src, dst_id, EVENT_MASKS[ev]))
+
+
+def _table_view_static(b, tv_el, d, where, resources, named, id_map):
+    """A static table view: the data source, its sections and their rows."""
+    ds = b.new("UITableViewDataSource")
+    sections_arr = b.new("NSArray")
+    sections_arr.add("NSInlinedValue", *b.boolean(False))
+    ds.add("UITableSections", *b.ref(sections_arr))
+    for si, sec_el in enumerate(tv_el.findall("sections/tableViewSection")):
+        _table_view_section(b, sec_el, si, d, where, resources, named, id_map,
+                             sections_arr)
+    d.ds = ds
+
+
+def _table_view_section(b, sec_el, si, d, where, resources, named, id_map,
+                         sections_arr):
+    """One static section: its header title, its rows and their cells."""
+    sec = b.new("UITableViewSection")
+    d.sections.append(sec)
+    header = sec_el.get("headerTitle")
+    if header is not None:
+        if set(sec_el.attrib) - {"headerTitle", "id"}:
+            raise XibError(f"<tableViewSection> unsupported attributes ({where})")
+        sec.add("UITableSectionHeaderTitle",
+                *b.ref(_localizable(b, header, f"{sec_el.get('id')}.headerTitle")))
+    elif set(sec_el.attrib) - {"id"}:
+        raise XibError(f"<tableViewSection> unsupported attributes ({where})")
+    rows_arr = b.new("NSArray")
+    rows_arr.add("NSInlinedValue", *b.boolean(False))
+    sec.add("UITableSectionRows", *b.ref(rows_arr))
+    cells = sec_el.findall("cells/tableViewCell")
+    for ri, cell_el in enumerate(cells):
+        # row_key reversed: within a section Apple lists the last
+        # row's connections first (oracle probes p1/p2/p3).
+        _table_view_row(b, cell_el, si, len(cells) - 1 - ri, d, where, resources,
+                         named, id_map, rows_arr)
+    sections_arr.add("UINibEncoderEmptyKey", *b.ref(sec))
+
+
+def _table_view_row(b, cell_el, si, row_key, d, where, resources, named, id_map,
+                    rows_arr):
+    """One static row: the cell, its outlets and its actions."""
+    row = b.new("UITableViewRow")
+    mark0 = len(b.kv_pairs)
+    sw, _dec, cell_outlets, cell_events, pairs_, cv, kids = build_cell(b, cell_el, where, resources, named, id_map)
+    mark1 = len(b.kv_pairs)
+    d.kv_marks.append((mark0, mark1))
+    # first deferred entry is the cell element's own UDA set
+    d.cell_uda_entries.extend(e for e in pairs_ if e[1] is sw)
+    d.subview_uda_entries.extend(e for e in pairs_ if e[1] is not sw)
+    skip = {sw, cv, *kids}
+    for prop, dst in cell_outlets:
+        d.outlets.append((prop, sw, dst, si, row_key))
+    for sel, src, dst, ev in cell_events:
+        if ev not in EVENT_MASKS:
+            raise XibError("action eventType " + repr(ev) + " not supported at cell " + repr(cell_el.get("id")) + " (" + where + ")")
+        d.events.append((sel, src, dst, EVENT_MASKS[ev]))
+    row.add("UITableRowCell", *b.ref(sw))
+    row.add("UITableRowHeight", *b.float32(-1.0))
+    rows_arr.add("UINibEncoderEmptyKey", *b.ref(row))
+    d.swappers.append(sw)
+    d.decoded.append((cv, kids))
+    # full cell tail keeps Apple's decode order (cv cons, per-kid
+    # groups, deferred stack kids)
+    d.cons.extend(x for x in _dec if x not in skip)
+
+
+def _table_view_prototypes(b, o, tv_el, d, where, resources, named):
+    """A prototype table view: every prototype cell becomes an embedded nib."""
+    if tv_el.findall("sections/tableViewSection"):
+        raise XibError(f"<tableView> prototypes with sections not supported ({where})")
+    nibs = b.new("NSMutableDictionary")
+    nibs.add("NSInlinedValue", *b.boolean(False))
+    pairs = []
+    for cell_el in tv_el.findall("prototypes/tableViewCell"):
+        reuse = _attr(cell_el, "reuseIdentifier", where)
+        pairs.append((reuse, _embedded_table_cell(cell_el, where, resources, named)))
+    for reuse, arch in pairs:
+        s = b.string(reuse)
+        nib = b.new("UINib")
+        nib.add("captureEnclosingNIBBundleOnDecode", *b.boolean(False))
+        data = b.new("NSData")
+        data.add("NS.bytes", N.DATA, arch)
+        nib.add("archiveData", *b.ref(data))
+        nibs.add("UINibEncoderEmptyKey", *b.ref(s))
+        nibs.add("UINibEncoderEmptyKey", *b.ref(nib))
+    ext = b.new("NSMutableDictionary")
+    ext.add("NSInlinedValue", *b.boolean(False))
+    for reuse, _arch in pairs:
+        s = b.string(reuse)
+        md = b.new("NSMutableDictionary")
+        md.add("NSInlinedValue", *b.boolean(False))
+        ext.add("UINibEncoderEmptyKey", *b.ref(s))
+        ext.add("UINibEncoderEmptyKey", *b.ref(md))
+    o.add("UITableViewCellPrototypeNibs", *b.ref(nibs))
+    o.add("UITableViewCellPrototypeNibExternalObjects", *b.ref(ext))
+    d.ds = None
+
+
+def build_table_view(b, tv_el, where, resources, vc_id, named=None, id_map=None, device=None):
+    """<tableView key="view">, static or prototypes. Returns the UITableView plus
+    everything the scene nib needs (sections, decode order, raw connections)."""
+    mode = _table_view_checks(tv_el, where)
+    d = _ViewData()
+    d.id_map = id_map
+    o = _table_view_object(b, tv_el, where, resources, device)
 
     d.tv_conns = [(c.get("property"), c.get("destination"))
                   for c in tv_el.findall("connections/outlet")]
@@ -4117,112 +4259,11 @@ def build_table_view(b, tv_el, where, resources, vc_id, named=None, id_map=None,
     d.cell_uda_entries = []  # deferred (el, target) cell-element UDA entries
     d.subview_uda_entries = []  # deferred (el, target) subview UDA entries
     d.kv_marks = []          # per-cell [start, end) slices into b.kv_pairs
-    footer_el = tv_el.find("view[@key='tableFooterView']")
-    if footer_el is not None:
-        # creation order (app gold): the footer subtree encodes right after the
-        # tableView's UISubviews array, BEFORE the data source and sections
-        subs_arr = b.new("NSMutableArray")
-        subs_arr.add("NSInlinedValue", *b.boolean(False))
-        fobj, fdecode, fevents, _fpairs = build_view(b, footer_el, where, resources, named, top=False, id_map=id_map)
-        id_map[footer_el.get("id")] = fobj
-        if NAV_BAR_CENTER_Y is not None:
-            # Apple re-anchors the static-table footer under the navigation bar
-            # (app gold 1m3: center = (w/2, nav-bar center))
-            fx, fy, fw, fh = _frame(footer_el)
-            fobj.values[1] = ("UICenter", N.Value(0, N.DATA,
-                               b"\x07" + struct.pack("<2d", fw / 2, NAV_BAR_CENTER_Y)))
-        subs_arr.add("UINibEncoderEmptyKey", *b.ref(fobj))
-        d.footer = fobj
-        # scene-rule tail: own constraints first, then the subview subtree
-        d.footer_tail = [x for x in fdecode[1:] if getattr(x, "cls", None) == "NSLayoutConstraint"] \
-            + [x for x in fdecode[1:] if getattr(x, "cls", None) != "NSLayoutConstraint"]
-        o.values.insert(2, ("UISubviews", N.Value(0, N.OBJREF, subs_arr.idx)))
-        o.values.insert(3, ("UIBackgroundColor",
-                            N.Value(0, N.OBJREF,
-                                    build_color(b, "systemGroupedBackgroundColor", where, resources).idx)))
-        o.add("UITableFooterView", *b.ref(fobj))
-        for sel, dst_id, ev, src in fevents:
-            if ev not in EVENT_MASKS:
-                raise XibError(f"footer action eventType {ev!r} not supported ({where})")
-            d.events.append((sel, src, dst_id, EVENT_MASKS[ev]))
+    _table_view_footer(b, o, tv_el, d, where, resources, named, id_map)
     if mode == "static":
-        ds = b.new("UITableViewDataSource")
-        sections_arr = b.new("NSArray")
-        sections_arr.add("NSInlinedValue", *b.boolean(False))
-        ds.add("UITableSections", *b.ref(sections_arr))
-        for si, sec_el in enumerate(tv_el.findall("sections/tableViewSection")):
-            sec = b.new("UITableViewSection")
-            d.sections.append(sec)
-            header = sec_el.get("headerTitle")
-            if header is not None:
-                if set(sec_el.attrib) - {"headerTitle", "id"}:
-                    raise XibError(f"<tableViewSection> unsupported attributes ({where})")
-                sec.add("UITableSectionHeaderTitle",
-                        *b.ref(_localizable(b, header, f"{sec_el.get('id')}.headerTitle")))
-            elif set(sec_el.attrib) - {"id"}:
-                raise XibError(f"<tableViewSection> unsupported attributes ({where})")
-            rows_arr = b.new("NSArray")
-            rows_arr.add("NSInlinedValue", *b.boolean(False))
-            sec.add("UITableSectionRows", *b.ref(rows_arr))
-            cells = sec_el.findall("cells/tableViewCell")
-            for ri, cell_el in enumerate(cells):
-                row = b.new("UITableViewRow")
-                mark0 = len(b.kv_pairs)
-                sw, _dec, cell_outlets, cell_events, pairs_, cv, kids = build_cell(b, cell_el, where, resources, named, id_map)
-                mark1 = len(b.kv_pairs)
-                d.kv_marks.append((mark0, mark1))
-                # first deferred entry is the cell element's own UDA set
-                d.cell_uda_entries.extend(e for e in pairs_ if e[1] is sw)
-                d.subview_uda_entries.extend(e for e in pairs_ if e[1] is not sw)
-                skip = {sw, cv, *kids}
-                for prop, dst in cell_outlets:
-                    # row_key reversed: within a section Apple lists the last
-                    # row's connections first (oracle probes p1/p2/p3).
-                    d.outlets.append((prop, sw, dst, si, len(cells) - 1 - ri))
-                for sel, src, dst, ev in cell_events:
-                    if ev not in EVENT_MASKS:
-                        raise XibError("action eventType " + repr(ev) + " not supported at cell " + repr(cell_el.get("id")) + " (" + where + ")")
-                    d.events.append((sel, src, dst, EVENT_MASKS[ev]))
-                row.add("UITableRowCell", *b.ref(sw))
-                row.add("UITableRowHeight", *b.float32(-1.0))
-                rows_arr.add("UINibEncoderEmptyKey", *b.ref(row))
-                d.swappers.append(sw)
-                d.decoded.append((cv, kids))
-                # full cell tail keeps Apple's decode order (cv cons, per-kid
-                # groups, deferred stack kids)
-                d.cons.extend(x for x in _dec if x not in skip)
-
-            sections_arr.add("UINibEncoderEmptyKey", *b.ref(sec))
-        d.ds = ds
+        _table_view_static(b, tv_el, d, where, resources, named, id_map)
     elif mode == "prototypes":
-        if tv_el.findall("sections/tableViewSection"):
-            raise XibError(f"<tableView> prototypes with sections not supported ({where})")
-        nibs = b.new("NSMutableDictionary")
-        nibs.add("NSInlinedValue", *b.boolean(False))
-        pairs = []
-        for cell_el in tv_el.findall("prototypes/tableViewCell"):
-            reuse = _attr(cell_el, "reuseIdentifier", where)
-            pairs.append((reuse, _embedded_table_cell(cell_el, where, resources, named)))
-        for reuse, arch in pairs:
-            s = b.string(reuse)
-            nib = b.new("UINib")
-            nib.add("captureEnclosingNIBBundleOnDecode", *b.boolean(False))
-            data = b.new("NSData")
-            data.add("NS.bytes", N.DATA, arch)
-            nib.add("archiveData", *b.ref(data))
-            nibs.add("UINibEncoderEmptyKey", *b.ref(s))
-            nibs.add("UINibEncoderEmptyKey", *b.ref(nib))
-        ext = b.new("NSMutableDictionary")
-        ext.add("NSInlinedValue", *b.boolean(False))
-        for reuse, _arch in pairs:
-            s = b.string(reuse)
-            md = b.new("NSMutableDictionary")
-            md.add("NSInlinedValue", *b.boolean(False))
-            ext.add("UINibEncoderEmptyKey", *b.ref(s))
-            ext.add("UINibEncoderEmptyKey", *b.ref(md))
-        o.add("UITableViewCellPrototypeNibs", *b.ref(nibs))
-        o.add("UITableViewCellPrototypeNibExternalObjects", *b.ref(ext))
-        d.ds = None
+        _table_view_prototypes(b, o, tv_el, d, where, resources, named)
     else:
         raise XibError(f"<tableView> dataMode={mode!r} not supported ({where})")
     o.add("UISeparatorInsetReference", *b.int8(0))
