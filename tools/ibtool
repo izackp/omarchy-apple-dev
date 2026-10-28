@@ -3630,21 +3630,9 @@ def _split_relationship_children(split_el, where):
     return [rel[r] for r in SPLIT_RELATIONSHIPS if r in rel]
 
 
-def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
-    """<vcId>-view-<viewId>.nib: [FO, FR, (Upstream), view]. Decode order:
-    view, root guide placeholders, root constraints, subviews, subview scroll
-    placeholders, subview constraint groups, visual-effect content views
-    (ContextMenu/6Bn/vO9 goldens)."""
-    sb = _Scene()
-    b = sb.b
-    root = b.new("NSObject")
-    top = b.new("NSArray")
-    fo = _proxy(b, "IBFilesOwner")
-    fr = _proxy(b, "IBFirstResponder")
-    vc_id = vc_el.get("id")
-    state = {"device": device}
-    up = _proxy(b, "UpstreamPlaceholder-1") if _vc_has_upstream(vc_el) else None
-    all_ids = state.setdefault("id_map", {})
+def _scene_view_guides(vc_el, root_el, where, state):
+    """<layoutGuides> on the scene VC become legacy top/bottom guides on the
+    root view; anything else is refused."""
     guides_el = vc_el.find("layoutGuides")
     if guides_el is not None:
         if root_el.tag != "view":
@@ -3654,8 +3642,10 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
             raise XibError(f"<layoutGuides> has unsupported {sorted(set(other))} ({where})")
         state["legacy_root"] = root_el
         state["legacy_guides"] = list(guides_el)
-    view, groups, events = _scene_element(sb, root_el, where, resources, named,
-                                          all_ids, state)
+
+
+def _scene_view_resize(b, view, vc_el, root_el, device):
+    """A frameless scene view below iOS 17 takes the default device's size."""
     if device is None and root_el.tag in FRAMELESS_TAGS \
             and root_el.find("rect[@key='frame']") is None \
             and MIN_DEPLOYMENT is not None and MIN_DEPLOYMENT < (17, 0):
@@ -3671,10 +3661,12 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
                 view.values[i] = (k, N.Value(0, *b.geom(0.0, 0.0, w, h)))
             if k == "UICenter":
                 view.values[i] = (k, N.Value(0, *b.geom(w / 2, h / 2)))
-    tops = [fo, fr] + ([up] if up else []) + [view]
-    top.add("NSInlinedValue", *b.boolean(False))
-    for x in tops:
-        top.add("UINibEncoderEmptyKey", *b.ref(x))
+
+
+def _scene_view_decode(b, root_el, tops, groups, state):
+    """The UINibObjectsKey decode list in Apple's order: view, root guide
+    placeholders, root constraints, subviews, subview scroll placeholders,
+    subview constraint groups, visual-effect content views."""
     decode = tops[:]
     extras = [(el_, x) for el_, x in state.get("extras", [])]
     for el_, x in extras:
@@ -3704,8 +3696,14 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
     for x in decode:
         objarr.add("UINibEncoderEmptyKey",
                    *b.ref(x(b) if callable(x) else x))
-    conn_arr = b.new("NSArray")
-    conn_arr.add("NSInlinedValue", *b.boolean(False))
+    return objarr
+
+
+def _scene_view_outlet_conns(b, vc_id, vc_el, root_el, where, view, up, state):
+    """Outlet connections as (label, source ref, destination ref) tuples:
+    the VC's own <connections>, then outlets declared inside the view tree
+    (e.g. collectionView delegate): the owning element maps to UISource, the
+    scene VC to the Upstream proxy."""
     conns = []
     known = {root_el.get("id"): view}
     id_map_all = state.get("id_map", {})
@@ -3720,15 +3718,10 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
                 raise XibError(f"outlet {oc.get('property')!r} needs an upstream "
                                f"placeholder ({where})")
             conns.append((oc.get("property"), b.ref(up), b.ref(dst)))
-    # outlets declared inside the view tree (e.g. collectionView delegate):
-    # the owning element maps to UISource, the scene VC to the Upstream proxy
     owner = {root_el: view}
     for el in state.get("owners", []):
         owner[el[0]] = el[1]
     prototype_tags = {"collectionViewCell", "collectionReusableView"}
-
-    def in_prototype(n):
-        return n.tag in prototype_tags if isinstance(n.tag, str) else False
     for node in root_el.iter():
         if isinstance(node.tag, str) and node.tag in prototype_tags:
             continue  # cell prototypes compile into their own archives
@@ -3743,6 +3736,14 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
                               b.ref(up)))
             else:
                 raise XibError(f"unroutable outlet {oc.attrib} ({where})")
+    return conns
+
+
+def _scene_view_conn_arr(b, vc_id, view, conns, events, fo, up, where):
+    """The UINibConnectionsKey array: outlets sorted by label, the view
+    outlet, then event connections sorted by selector."""
+    conn_arr = b.new("NSArray")
+    conn_arr.add("NSInlinedValue", *b.boolean(False))
     for prop, src, dst in sorted(conns, key=lambda t: t[0]):
         c = b.new("UIRuntimeOutletConnection")
         c.add("UILabel", *b.ref(b.string(prop)))
@@ -3763,6 +3764,12 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
         c.add("UIDestination", *b.ref(up))
         c.add("UIEventMask", *b.int_fit(mask))
         conn_arr.add("UINibEncoderEmptyKey", *b.ref(c))
+    return conn_arr
+
+
+def _scene_view_assemble(b, sb, root, top, objarr, conn_arr):
+    """Top-level keys on the archive root, including flow-layout
+    estimatedItemSize key-value pairs."""
     empty = sb.empty_array()
     root.add("UINibTopLevelObjectsKey", *b.ref(top))
     root.add("UINibObjectsKey", *b.ref(objarr))
@@ -3770,10 +3777,6 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
     for key in ("UINibVisibleWindowsKey", "UINibAccessibilityConfigurationsKey",
                 "UINibTraitStorageListsKey"):
         root.add(key, *b.ref(empty))
-    # flow-layout runtime attributes (estimatedItemSize)
-    for marker_el, target in sb.pairs:
-        if marker_el == "__flow__":
-            pass
     flow_pairs = [(el, t) for el, t in sb.pairs if el == "__flow__"]
     if flow_pairs:
         kvp = b.new("NSArray")
@@ -3789,6 +3792,36 @@ def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
     else:
         root.add("UINibKeyValuePairsKey", *b.ref(empty))
     root.add("IBUINibLNEVersionKey", *b.int8(1))
+
+
+def _scene_view_nib(vc_el, root_el, where, resources, named, device=None):
+    """<vcId>-view-<viewId>.nib: [FO, FR, (Upstream), view]. Decode order:
+    view, root guide placeholders, root constraints, subviews, subview scroll
+    placeholders, subview constraint groups, visual-effect content views
+    (ContextMenu/6Bn/vO9 goldens)."""
+    sb = _Scene()
+    b = sb.b
+    root = b.new("NSObject")
+    top = b.new("NSArray")
+    fo = _proxy(b, "IBFilesOwner")
+    fr = _proxy(b, "IBFirstResponder")
+    vc_id = vc_el.get("id")
+    state = {"device": device}
+    up = _proxy(b, "UpstreamPlaceholder-1") if _vc_has_upstream(vc_el) else None
+    all_ids = state.setdefault("id_map", {})
+    _scene_view_guides(vc_el, root_el, where, state)
+    view, groups, events = _scene_element(sb, root_el, where, resources, named,
+                                          all_ids, state)
+    _scene_view_resize(b, view, vc_el, root_el, device)
+    tops = [fo, fr] + ([up] if up else []) + [view]
+    top.add("NSInlinedValue", *b.boolean(False))
+    for x in tops:
+        top.add("UINibEncoderEmptyKey", *b.ref(x))
+    objarr = _scene_view_decode(b, root_el, tops, groups, state)
+    conns = _scene_view_outlet_conns(b, vc_id, vc_el, root_el, where, view, up,
+                                     state)
+    conn_arr = _scene_view_conn_arr(b, vc_id, view, conns, events, fo, up, where)
+    _scene_view_assemble(b, sb, root, top, objarr, conn_arr)
     return finalize(b, root)
 
 
