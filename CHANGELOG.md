@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.3
 
 ### asc.py states its cryptography requirement
 
@@ -65,6 +65,21 @@
 - `install-toolchain.sh` step 3 stopped with `install: cannot stat '…/libXADI.so'`. The xtool 1.23.0 pin (`f300489`, v0.4.1) no longer has XADI: xtool replaced it with Omnisette ("gsa: use macOS Omnisette", #380). The installer now copies `xtool` alone, then its Swift runtime libraries as before.
 - A run that stopped there had already copied `xtool`, so the next run skipped the step and `xtool` failed with `libswiftCore.so: cannot open shared object file`. Step 3 now also rebuilds when `libswiftCore.so` is missing next to `xtool`, which repairs those installs without removing anything by hand.
 - Checked on a fresh x86_64 Arch EC2 instance (Swift 6.4.1 from AUR `swift-bin`): a full install to the SDK step, and a re-run with only `xtool` left in the install directory.
+
+### ibtool: smaller functions, same output
+
+- Six functions of `tools/ibtool` that were over 100 lines are split into private helpers, called in the old order: `build_cell` (#93), `_prototype_archive` (#94), `_scene_nav_nib_ident` (#100), `build_table_view` (#101), `_scene_split_nib` (#102) and `_scene_view_nib` (#103). The output is unchanged. Each PR compared it with the golden nibs (`tools/ibtool --self-test`) and, byte for byte, on every iOS input in `tests/ibtool/src` before and after, with and without a module name. The PR for `_scene_view_nib` also deleted two pieces of dead code and creates one array after an outlet loop that creates no objects; it argues why the bytes cannot change.
+- New tests pin the refusal messages and the output order of the functions above, which the golden corpus never reaches: `tests/test_ibtool_build_table_view.py`, `tests/test_ibtool_scene_nav_nib_ident.py`, `tests/test_ibtool_scene_split_nib.py` and `tests/test_ibtool_scene_view_nib.py` (#100 to #104). They pin what this tool writes, not what Apple's tool writes.
+- `tests/run.sh` runs `tools/ibtool --self-test`, so CI compares the iOS golden nibs (#92).
+- `tools/ips-symbolicate.py` reads the Mach-O `cputype` as unsigned, like its other header fields (#91). For arm64 the value is the same either way.
+
+### provision-dev takes several devices
+
+- `tools/provision-dev.py --udid` takes several UDIDs for one profile (#84). The receipt `receipts/2026-10-25-ipad-over-tailnet.md` records the first iPad run of the over-tailnet route.
+
+### Documentation
+
+- The README, `GETTING-STARTED.md`, `FINDINGS.md` and the guides under `docs/` are refreshed (#83).
 
 ## v0.4.2
 
