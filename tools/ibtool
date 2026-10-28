@@ -3451,14 +3451,10 @@ def _scene_vc_nib(vc_el, where, resources, named):
     return finalize(b, root), made["name"]
 
 
-def _scene_split_nib(split_el, children, where, resources, named):
-    """A splitViewController scene: one nib holding the split swapper and every
-    child VC swapper (RootSplit golden). Children arrive in relationship order
-    (master, supplementary, detail). Returns (bytes, split name)."""
-    sb = _Scene()
-    b = sb.b
-    root = b.new("NSObject")
-    top = b.new("NSArray")
+def _scene_split_objects(split_el, children, b):
+    """Placeholder proxies for the top-level objects, in creation order:
+    children reachable by segue first, then the rest, plus files owner, first
+    responder and the split placeholder; and the split nib name."""
     by_id = {child.get("id"): child for child in children}
     segue_ids = [s.get("destination") for s in reversed(split_el.findall("./connections/segue"))]
     top_children = [by_id[sid] for sid in segue_ids if sid in by_id]
@@ -3472,6 +3468,13 @@ def _scene_split_nib(split_el, children, where, resources, named):
     split_ph = _proxy(b, "UIStoryboardPlaceholder")
     ident = split_el.get("storyboardIdentifier")
     name = ident or f"UISplitViewController-{split_el.get('id')}"
+    return top_phs, child_phs, fo, fr, split_ph, name
+
+
+def _scene_split_swapper(split_el, b, where):
+    """The split view controller swapper: storyboard identifier, child array
+    and attribute keys, refusing unsupported attribute values."""
+    ident = split_el.get("storyboardIdentifier")
     split = b.new("UIClassSwapper")
     if ident:
         split.add("UIStoryboardIdentifier", *b.ref(b.string(ident)))
@@ -3505,22 +3508,13 @@ def _scene_split_nib(split_el, children, where, resources, named):
             raise XibError(f"behavior={behavior!r} unsupported ({where})")
         split.add("UISplitViewControllerPreferredSplitBehavior",
                   *b.int8(SPLIT_BEHAVIORS[behavior]))
-    made_children = []
-    for child, ph in zip(children, child_phs):
-        swapper = b.new("UIClassSwapper")
-        made = _vc_swapper_values(sb, swapper, child, where, b.ref(split))
-        made["ph"] = ph
-        made["swapper"] = swapper
-        made_children.append(made)
-        child_arr.add("UINibEncoderEmptyKey", *b.ref(swapper))
-    split.add("UIClassName", *b.ref(b.string(_swift_class(split_el)
-                                             or "UISplitViewController")))
-    split.add("UIOriginalClassName", *b.ref(b.string("UISplitViewController")))
-    top.add("NSInlinedValue", *b.boolean(False))
-    for x in top_phs + [fo, fr, split_ph, split]:
-        top.add("UINibEncoderEmptyKey", *b.ref(x))
-    # decode: children sorted by storyboard identifier (missing last), each with
-    # nav + toolbar items, then right items per child in the same order
+    return split, child_arr
+
+
+def _scene_split_decode(made_children, children, top_phs, fo, fr, split_ph, split, b):
+    """The decode list: children sorted by storyboard identifier (missing
+    last), each with nav + toolbar items, then right items per child in the
+    same order."""
     order = sorted(range(len(made_children)),
                    key=lambda i: (children[i].get("storyboardIdentifier") is None,
                                   children[i].get("storyboardIdentifier") or ""))
@@ -3538,8 +3532,12 @@ def _scene_split_nib(split_el, children, where, resources, named):
         decode.extend(obj for _el, obj in made_children[i]["nav_items"])
     for x in decode:
         objarr.add("UINibEncoderEmptyKey", *b.ref(x))
-    conn_arr = b.new("NSArray")
-    conn_arr.add("NSInlinedValue", *b.boolean(False))
+    return objarr
+
+
+def _scene_split_outlet_conns(conn_arr, made_children, fo, split, split_ph, b):
+    """Outlet connections: each child's storyboard, the files owner's
+    sceneViewController, and bar items wired across children."""
     c = b.new("UIRuntimeOutletConnection")
     c.add("UILabel", *b.ref(b.string("storyboard")))
     c.add("UISource", *b.ref(split))
@@ -3578,6 +3576,10 @@ def _scene_split_nib(split_el, children, where, resources, named):
             c.add("UISource", *b.ref(src))
             c.add("UIDestination", *b.ref(dst))
         conn_arr.add("UINibEncoderEmptyKey", *b.ref(c))
+
+
+def _scene_split_event_conns(conn_arr, made_children, where, b):
+    """Event connections from bar item actions to their owning child VC."""
     events = []
     for m in made_children:
         for el, obj in m["toolbar"] + m["nav_items"]:
@@ -3592,6 +3594,11 @@ def _scene_split_nib(split_el, children, where, resources, named):
         c.add("UISource", *b.ref(src))
         c.add("UIDestination", *b.ref(dst))
         conn_arr.add("UINibEncoderEmptyKey", *b.ref(c))
+
+
+def _scene_split_root(root, top, objarr, conn_arr, made_children, children, sb, b):
+    """The root dictionary, with bar item runtime attributes in the verified
+    order (empty key-value pairs when none exist)."""
     empty = sb.empty_array()
     root.add("UINibTopLevelObjectsKey", *b.ref(top))
     root.add("UINibObjectsKey", *b.ref(objarr))
@@ -3613,6 +3620,38 @@ def _scene_split_nib(split_el, children, where, resources, named):
     else:
         root.add("UINibKeyValuePairsKey", *b.ref(empty))
     root.add("IBUINibLNEVersionKey", *b.int8(1))
+
+
+def _scene_split_nib(split_el, children, where, resources, named):
+    """A splitViewController scene: one nib holding the split swapper and every
+    child VC swapper (RootSplit golden). Children arrive in relationship order
+    (master, supplementary, detail). Returns (bytes, split name)."""
+    sb = _Scene()
+    b = sb.b
+    root = b.new("NSObject")
+    top = b.new("NSArray")
+    top_phs, child_phs, fo, fr, split_ph, name = _scene_split_objects(split_el, children, b)
+    split, child_arr = _scene_split_swapper(split_el, b, where)
+    made_children = []
+    for child, ph in zip(children, child_phs):
+        swapper = b.new("UIClassSwapper")
+        made = _vc_swapper_values(sb, swapper, child, where, b.ref(split))
+        made["ph"] = ph
+        made["swapper"] = swapper
+        made_children.append(made)
+        child_arr.add("UINibEncoderEmptyKey", *b.ref(swapper))
+    split.add("UIClassName", *b.ref(b.string(_swift_class(split_el)
+                                             or "UISplitViewController")))
+    split.add("UIOriginalClassName", *b.ref(b.string("UISplitViewController")))
+    top.add("NSInlinedValue", *b.boolean(False))
+    for x in top_phs + [fo, fr, split_ph, split]:
+        top.add("UINibEncoderEmptyKey", *b.ref(x))
+    objarr = _scene_split_decode(made_children, children, top_phs, fo, fr, split_ph, split, b)
+    conn_arr = b.new("NSArray")
+    conn_arr.add("NSInlinedValue", *b.boolean(False))
+    _scene_split_outlet_conns(conn_arr, made_children, fo, split, split_ph, b)
+    _scene_split_event_conns(conn_arr, made_children, where, b)
+    _scene_split_root(root, top, objarr, conn_arr, made_children, children, sb, b)
     return finalize(b, root), name
 
 
