@@ -2297,8 +2297,18 @@ class Generator:
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
             if os.path.lexists(lpath):
                 continue
-            os.symlink(os.path.relpath(os.path.join(self.proj_dir, dest),
-                                       os.path.dirname(lpath)), lpath)
+            os.symlink(self.link_target(os.path.join(self.proj_dir, dest),
+                                        os.path.dirname(lpath)), lpath)
+
+    def link_target(self, dest, link_dir):
+        """A symlink's target: relative while the adapter sits inside the
+        project, so the two move together; absolute when it is elsewhere.
+        SwiftPM's native build copies a resource symlink into the resource
+        bundle as it is, where a relative target no longer resolves."""
+        out = os.path.abspath(self.out_dir)
+        if out == self.proj_dir or out.startswith(self.proj_dir + os.sep):
+            return os.path.relpath(dest, link_dir)
+        return os.path.abspath(dest)
 
     def _plan_extension(self, ext_id, ext, app_layers, dev_region, packages, pkg_seen):
         """Plan one embedded extension: files, packages, Info.plist, icon.
