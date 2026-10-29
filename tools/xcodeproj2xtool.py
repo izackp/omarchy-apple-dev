@@ -361,7 +361,7 @@ def sw_sy(v):
 
 class Generator:
     def __init__(self, proj_path, target_name=None, out_dir=None, bundle_id=None,
-                 workspace=None, configuration="Release"):
+                 workspace=None, configuration="Release", products_dir=None):
         self.proj_path = proj_path
         self.configuration = configuration
         # The .xcworkspace the app is built through: its Package.resolved pins
@@ -391,6 +391,11 @@ class Generator:
         # Embedded extension name -> its ASSETCATALOG_COMPILER_APPICON_NAME.
         self.extension_icons = {}
         self.out_dir = out_dir or os.path.join(self.proj_dir, "omarchy-xtool")
+        # Where SwiftPM puts the build's products, so <Mod/Mod-Swift.h> can
+        # link to the header it generates for a framework's Swift.
+        self.products_dir = products_dir or os.path.join(
+            self.out_dir, ".build", "arm64-apple-ios", self.configuration.lower())
+        self.swift_headers_dir = os.path.join(self.out_dir, "SwiftHeaders")
         self.target_name = target_name
         self.forced_bundle_id = bundle_id
         self.project = self.objs[self.data["rootObject"]]
@@ -1939,7 +1944,7 @@ class Generator:
             csettings.append('.unsafeFlags(["-fobjc-arc"])')
         # Xcode's header map: any project header by bare name.
         csettings.append(".unsafeFlags([" + ", ".join(
-            sw_sy(f"-I{d}") for d in self.project_header_dirs()) + "])")
+            sw_sy(f"-I{d}") for d in self.project_header_dirs() + [self.swift_headers_dir]) + "])")
         header_dirs = [os.path.join(self.proj_dir, d) for d in src_dirs]
         return {"name": tname, "csettings": csettings, "header_dirs": header_dirs,
                 "count": len(objc)}
@@ -2049,7 +2054,8 @@ class Generator:
         """A Generator for a referenced sub-project, sharing this adapter."""
         if proj not in self._subprojects:
             sub = Generator(proj, out_dir=self.out_dir, workspace=self.workspace,
-                            configuration=self.configuration)
+                            configuration=self.configuration,
+                            products_dir=self.products_dir)
             sub.package_traits = self.package_traits
             sub.platform = self.platform
             self._subprojects[proj] = sub
@@ -2146,16 +2152,22 @@ class Generator:
                     continue
                 os.symlink(h, link)
             if plan["swift"]:
-                # <Mod/Mod-Swift.h> as frameworks expose it; SwiftPM generates
-                # Mod-Swift.h on the Swift target's include path.
-                with open(os.path.join(inc, f"{mod}-Swift.h"), "w") as f:
-                    f.write(f"#import <{mod}-Swift.h>\n")
+                # <Mod/Mod-Swift.h>, as a .framework exposes it, links to the
+                # header SwiftPM generates. It sits outside include/: in the
+                # module's umbrella dir it would make building the Swift need
+                # the header that building the Swift produces.
+                compat = os.path.join(self.swift_headers_dir, mod)
+                os.makedirs(compat, exist_ok=True)
+                link = os.path.join(compat, f"{mod}-Swift.h")
+                if not os.path.lexists(link):
+                    os.symlink(os.path.join(self.products_dir, f"{mod}.build",
+                                            "include", f"{mod}-Swift.h"), link)
             if plan["objc"]:
                 mirror(objc_name, plan["objc"])
             else:
                 with open(os.path.join(self.out_dir, "Sources", objc_name, "empty.m"), "w") as f:
                     f.write("// headers-only module\n")
-            flags = [f"-I{d}" for d in plan["header_dirs"]]
+            flags = [f"-I{d}" for d in plan["header_dirs"] + [self.swift_headers_dir]]
             if plan["arc"]:
                 flags.append("-fobjc-arc")
             if plan["prefix"]:
@@ -2405,7 +2417,7 @@ class Generator:
             objc_target = self.plan_objc_target(name, self.objc_by_target[name], layers)
         bflags = self.bridging_flags(
             layers, (objc_target["header_dirs"] if objc_target else [])
-            + self.project_header_dirs() + fw_includes)
+            + self.project_header_dirs() + fw_includes + [self.swift_headers_dir])
         if bflags:
             app_swift = app_swift + [".unsafeFlags([" + ", ".join(sw_sy(f) for f in bflags) + "])"]
         self.write_manifest(name, layers, packages, app_products,
@@ -3603,6 +3615,9 @@ def main():
                          "the product name with spaces removed)")
     ap.add_argument("--configuration", default="Release",
                     help="build configuration whose settings to use (default: Release)")
+    ap.add_argument("--products-dir", metavar="PATH",
+                    help="the directory swift build writes products to (default: "
+                         "<out>/.build/arm64-apple-ios/<configuration>)")
     ap.add_argument("--workspace", metavar="PATH",
                     help="the .xcworkspace the app builds through: use its "
                          "Package.resolved and its other projects' local packages")
@@ -3623,7 +3638,8 @@ def main():
             os.path.join(args.workspace, "contents.xcworkspacedata")):
         ap.error(f"{args.workspace} is not an .xcworkspace directory")
     gen = Generator(args.project, args.target, args.out, args.bundle_id,
-                    workspace=args.workspace, configuration=args.configuration)
+                    workspace=args.workspace, configuration=args.configuration,
+                    products_dir=args.products_dir and os.path.abspath(args.products_dir))
     for spec in args.package_traits:
         pkg, sep, traits = spec.partition("=")
         if not sep or not pkg or not traits:
