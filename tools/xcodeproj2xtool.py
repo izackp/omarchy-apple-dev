@@ -309,8 +309,17 @@ def sw_sy(v):
 
 
 class Generator:
-    def __init__(self, proj_path, target_name=None, out_dir=None, bundle_id=None):
+    def __init__(self, proj_path, target_name=None, out_dir=None, bundle_id=None,
+                 workspace=None):
         self.proj_path = proj_path
+        # The .xcworkspace the app is built through: its Package.resolved pins
+        # the packages, and its other projects' local packages are visible.
+        self.workspace = os.path.abspath(workspace) if workspace else None
+        self._workspace_package_dirs = None
+        # Package label (lowercased) -> traits to enable. A manifest that picks
+        # its default traits with `#if os(...)` sees the build host, not the
+        # target, so a cross build from Linux can need them set explicitly.
+        self.package_traits = {}
         self.proj_dir = os.path.dirname(os.path.abspath(proj_path))
         self.data = parse_pbxproj(os.path.join(proj_path, "project.pbxproj"))
         self.objs = self.data["objects"]
@@ -611,10 +620,65 @@ class Generator:
 
     # -- packages -----------------------------------------------------------
 
+    def resolved_file(self):
+        """The Package.resolved Xcode builds with: the workspace's, else the
+        project's own."""
+        candidates = []
+        if self.workspace:
+            candidates.append(os.path.join(self.workspace, "xcshareddata",
+                                           "swiftpm", "Package.resolved"))
+        candidates.append(os.path.join(self.proj_path, "project.xcworkspace",
+                                       "xcshareddata", "swiftpm", "Package.resolved"))
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def workspace_projects(self):
+        """Absolute paths of the .xcodeproj files the workspace lists."""
+        if not self.workspace:
+            return []
+        p = os.path.join(self.workspace, "contents.xcworkspacedata")
+        try:
+            root = ET.parse(p).getroot()
+        except (OSError, ET.ParseError) as e:
+            self.warn(f"cannot read {p} ({e})")
+            return []
+        base = os.path.dirname(self.workspace)
+        out = []
+        for ref in root.iter("FileRef"):
+            kind, _, loc = ref.get("location", "").partition(":")
+            if not loc.endswith(".xcodeproj"):
+                continue
+            path = loc if kind == "absolute" else os.path.join(base, loc)
+            out.append(os.path.normpath(path))
+        return out
+
+    def workspace_package_dirs(self):
+        """Local packages referenced by any project in the workspace, as
+        project-relative directories. Xcode resolves a product against all of
+        them, not only the ones the app's own project declares."""
+        if self._workspace_package_dirs is not None:
+            return self._workspace_package_dirs
+        dirs = self._workspace_package_dirs = []
+        for proj in self.workspace_projects():
+            pbx = os.path.join(proj, "project.pbxproj")
+            if not os.path.isfile(pbx):
+                continue
+            objs = parse_pbxproj(pbx)["objects"]
+            for o in objs.values():
+                if o.get("isa") != "XCLocalSwiftPackageReference":
+                    continue
+                d = os.path.normpath(os.path.join(os.path.dirname(proj),
+                                                  o.get("relativePath", "")))
+                rel = os.path.relpath(d, self.proj_dir)
+                if os.path.isfile(os.path.join(d, "Package.swift")) and rel not in dirs:
+                    dirs.append(rel)
+        return dirs
+
     def resolved_revisions(self):
-        p = os.path.join(self.proj_path, "project.xcworkspace", "xcshareddata",
-                         "swiftpm", "Package.resolved")
-        if not os.path.isfile(p):
+        p = self.resolved_file()
+        if not p:
             return {}
         try:
             with open(p, encoding="utf-8") as f:
@@ -632,6 +696,13 @@ class Generator:
                 if loc:
                     revs[self.package_identity(loc)] = rev
         return revs
+
+    def remote_package_line(self, url, req):
+        traits = self.package_traits.get(package_label(url).lower())
+        if traits:
+            listed = ", ".join(sw_sy(t) for t in traits)
+            return f'.package(url: {sw_sy(url)}, {req}, traits: [{listed}])'
+        return f'.package(url: {sw_sy(url)}, {req})'
 
     @staticmethod
     def package_identity(url):
@@ -1297,6 +1368,11 @@ class Generator:
                             encoding="utf-8", errors="replace").read()
                 for m in re.finditer(r'\.library\(\s*name:\s*"([^"]+)"', text):
                     found.setdefault(m.group(1), rel)
+        for rel in self.workspace_package_dirs():
+            text = open(os.path.join(self.proj_dir, rel, "Package.swift"),
+                        encoding="utf-8", errors="replace").read()
+            for m in re.finditer(r'\.library\(\s*name:\s*"([^"]+)"', text):
+                found.setdefault(m.group(1), rel)
         return found
 
     def _plan_explicit_products(self, target, refs, local_refs, revs, seen_prod):
@@ -1347,7 +1423,7 @@ class Generator:
                     continue
                 if x not in seen_pkg:
                     seen_pkg[x] = True
-                    packages.append(f'.package(url: {sw_sy(x)}, {req})')
+                    packages.append(self.remote_package_line(x, req))
                 products.append((name, package_label(x)))
             else:
                 declared = decl_local.get(x)
@@ -1418,7 +1494,7 @@ class Generator:
             seen_prod.add(mod)
             if url not in seen_pkg:
                 seen_pkg[url] = True
-                extra_pkgs.append(f'.package(url: {sw_sy(url)}, {req})')
+                extra_pkgs.append(self.remote_package_line(url, req))
             extra_prods.append((mod, package_label(url)))
         if extra_prods:
             self.warn("declared additional packages for modules the target imports "
@@ -1913,6 +1989,11 @@ class Generator:
 
         self.write_manifest(name, layers, packages, app_products,
                             excludes, resources, app_swift, extensions)
+        # Pin the adapter to the versions Xcode builds with; without this
+        # SwiftPM takes the newest version each requirement allows.
+        resolved = self.resolved_file()
+        if resolved:
+            shutil.copyfile(resolved, os.path.join(self.out_dir, "Package.resolved"))
         bundle = self.bundle_id(layers)
         if self.forced_bundle_id:
             bundle = self._rebase_extension_bundle_ids(extensions, bundle)
@@ -3066,6 +3147,13 @@ def main():
                          "rebased (extension IDs that start with the app's "
                          "original ID keep their suffix; the rest get '.' + "
                          "the product name with spaces removed)")
+    ap.add_argument("--workspace", metavar="PATH",
+                    help="the .xcworkspace the app builds through: use its "
+                         "Package.resolved and its other projects' local packages")
+    ap.add_argument("--package-traits", metavar="PACKAGE=TRAIT[,TRAIT]",
+                    action="append", default=[],
+                    help="enable these traits on a remote package (by its URL's "
+                         "basename, e.g. SQLite.swift=SystemSQLite); repeatable")
     args = ap.parse_args()
     if args.self_test:
         self_test()
@@ -3075,7 +3163,17 @@ def main():
     if not args.project.endswith(".xcodeproj") or \
             not os.path.isfile(os.path.join(args.project, "project.pbxproj")):
         ap.error(f"{args.project} is not an .xcodeproj directory")
-    Generator(args.project, args.target, args.out, args.bundle_id).run()
+    if args.workspace and not os.path.isfile(
+            os.path.join(args.workspace, "contents.xcworkspacedata")):
+        ap.error(f"{args.workspace} is not an .xcworkspace directory")
+    gen = Generator(args.project, args.target, args.out, args.bundle_id,
+                    workspace=args.workspace)
+    for spec in args.package_traits:
+        pkg, sep, traits = spec.partition("=")
+        if not sep or not pkg or not traits:
+            ap.error(f"--package-traits {spec!r}: expected PACKAGE=TRAIT[,TRAIT]")
+        gen.package_traits[pkg.lower()] = [t for t in traits.split(",") if t]
+    gen.run()
 
 
 if __name__ == "__main__":
