@@ -140,6 +140,15 @@ def parse_args(argv):
 
 # ------------------------------------------------------------------- model XML
 
+def parse_int(s):
+    """An integer attribute's default. Xcode's model editor accepts and keeps
+    a decimal spelling ("0.0") for one, and momc reads it as that number."""
+    try:
+        return int(s)
+    except ValueError:
+        return int(float(s))
+
+
 class Attr:
     def __init__(self, el):
         self.name = el.get("name")
@@ -161,7 +170,7 @@ class Attr:
             self.default = ("bool", s in ("YES", "true")) if self.type == 800 else \
                 ("string", s) if self.type in (700, 1800) else \
                 ("decimal", s) if self.type == 400 else \
-                ("float", float(s)) if self.type in (500, 600) else ("number", int(s))
+                ("float", float(s)) if self.type in (500, 600) else ("number", parse_int(s))
         if el.get("defaultDateTimeInterval") is not None:
             self.default = ("date", float(el.get("defaultDateTimeInterval")))
 
