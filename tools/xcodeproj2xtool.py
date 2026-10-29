@@ -1462,13 +1462,26 @@ class Generator:
         Returns (explicit, decl_local, local_paths); seen_prod gains names."""
         explicit = []   # ("remote", name, url, req) | ("local", name, rp, None)
         decl_local, local_paths = {}, []
-        for dep in [self.objs[i] for i in target.get("packageProductDependencies", [])
-                    if isinstance(self.objs.get(i), dict)]:
+        # Xcode links a product named either in packageProductDependencies or
+        # only by a productRef in the Frameworks phase (Dashboard-Dev's list
+        # is empty), and that reference may not name its package; another
+        # reference to the same product in the project then does.
+        dep_ids = list(target.get("packageProductDependencies", []))
+        for ph in target.get("buildPhases", []):
+            p = self.objs.get(ph) or {}
+            if p.get("isa") == "PBXFrameworksBuildPhase":
+                dep_ids += [(self.objs.get(bf) or {}).get("productRef")
+                            for bf in p.get("files", [])]
+        pkg_of_product = {}
+        for o in self.objs.values():
+            if o.get("isa") == "XCSwiftPackageProductDependency" and o.get("package"):
+                pkg_of_product.setdefault(o.get("productName"), o["package"])
+        for dep in [self.objs[i] for i in dep_ids if isinstance(self.objs.get(i), dict)]:
             name = dep.get("productName")
             if not name or name in seen_prod:
                 continue
             seen_prod.add(name)
-            pkg_id = dep.get("package")
+            pkg_id = dep.get("package") or pkg_of_product.get(name)
             if pkg_id in refs:
                 req = self.requirement(refs[pkg_id], revs)
                 if req:
