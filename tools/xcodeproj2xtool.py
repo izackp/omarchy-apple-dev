@@ -371,8 +371,10 @@ class Generator:
         layers += self.config_settings(target.get("buildConfigurationList"))
         return layers
 
+    # Layers run from least to most specific (target_merged), so the last one
+    # that sets a key wins, as in Xcode.
     def setting(self, layers, key):
-        for l in layers:
+        for l in reversed(layers):
             if l.get(key):
                 return l[key]
         return None
@@ -385,7 +387,7 @@ class Generator:
             name = m.group(1)
             if name == "inherited":
                 return ""
-            for l in layers:
+            for l in reversed(layers):
                 if name in l:
                     return self.expand(l[name], layers, _depth + 1)
             return m.group(0)
