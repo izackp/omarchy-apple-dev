@@ -900,7 +900,9 @@ class Generator:
             return set()
         text = open(mf, encoding="utf-8", errors="replace").read()
         libraries = {}
-        for m in re.finditer(r'\.library\((.*?)\)', text):
+        # re.S: a .library( declaration usually spans several lines; missing
+        # it made every product look like it carries every target.
+        for m in re.finditer(r'\.library\((.*?)\)', text, re.S):
             body = m.group(1)
             nm = re.search(r'name:\s*"([^"]+)"', body)
             tm = re.search(r'targets:\s*\[([^\]]*)\]', body)
