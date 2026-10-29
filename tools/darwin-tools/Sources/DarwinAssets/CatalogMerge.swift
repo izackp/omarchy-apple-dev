@@ -72,6 +72,7 @@ public enum CatalogMerge {
                     let name = child.deletingPathExtension().lastPathComponent
                     if name == appIcon || includeAllAppIcons || alternateAppIcons.contains(name) {
                         try place(child, at: target)
+                        try dropUnknownIdioms(in: target)
                     }
                     // Deselected icon sets drop silently, like Apple's.
                 case "icon":
@@ -115,6 +116,25 @@ public enum CatalogMerge {
             return images.compactMap { ($0["filename"] as? String).map { URL(fileURLWithPath: $0).pathExtension.lowercased() } }
                 // HEIC/HEIF decode through libheif's heif-convert.
                 .first { !["png", "jpg", "jpeg", "svg", "pdf", "heic", "heif"].contains($0) }
+        }
+
+        /// An icon set shared with a watch app lists idioms AssetKit cannot decode
+        /// (watch-marketing) and sizes left empty; either fails the whole compile.
+        /// Apple's actool ignores another platform's entries and unfilled slots, so
+        /// drop them from the copy.
+        func dropUnknownIdioms(in iconSet: URL) throws {
+            let file = iconSet.appendingPathComponent("Contents.json")
+            guard let data = try? Data(contentsOf: file),
+                  var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let images = json["images"] as? [[String: Any]] else { return }
+            let known: Set<String> = ["universal", "iphone", "ipad", "mac", "tv", "watch", "car", "ios-marketing"]
+            let kept = images.filter {
+                ($0["idiom"] as? String).map(known.contains) ?? true
+                    && ($0["filename"] != nil || $0["idiom"] as? String == "universal")
+            }
+            guard kept.count != images.count else { return }
+            json["images"] = kept
+            try JSONSerialization.data(withJSONObject: json).write(to: file)
         }
 
         /// Copies a colorset without its color-less entries (Xcode's empty AccentColor placeholder).
