@@ -2217,27 +2217,34 @@ class Generator:
         self.icon_assets += len(seen)
         return len(seen)
 
-    def objc_target_block(self, objc, deps):
+    def objc_target_block(self, objc, swift_target, deps):
         cs = ",\n".join(f"                {c}" for c in objc["csettings"])
+        # The ObjC depends on the app's Swift, not the other way round: Swift
+        # only needs the ObjC headers (the bridging header gives it those),
+        # while ObjC that imports <App>-Swift.h needs the Swift target built
+        # first. SwiftPM cannot express Xcode's two-way mix in one target,
+        # and a cycle between two is rejected. In Xcode the app's ObjC also
+        # sees every package product the app links (a C package's public
+        # headers, e.g. <GCDAsyncUdpSocket.h>).
+        lines = [f"                {sw_sy(swift_target)},"] + [
+            f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
+            for n, pk in deps]
+        prods = "\n".join(lines)
         txt = f"""        .target(
             name: {sw_sy(objc["name"])},
+            dependencies: [
+{prods}
+            ],
 """
-        # In Xcode the app's ObjC sees every package product the app links
-        # (a C package's public headers, e.g. <GCDAsyncUdpSocket.h>).
-        if deps:
-            prods = "\n".join(f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
-                               for n, pk in deps)
-            txt += f"            dependencies: [\n{prods}\n            ],\n"
         if cs:
             txt += f"            cSettings: [\n{cs},\n            ]\n"
         return txt + "        ),\n"
 
     def target_block(self, tname, deps, excludes, resources, swift,
-                     executable=False, target_deps=()):
+                     executable=False):
         prod_lines = "\n".join(
-            [f"                {sw_sy(t)}," for t in target_deps] +
-            [f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
-             for n, pk in deps])
+            f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
+            for n, pk in deps)
         kind = ".executableTarget" if executable else ".target"
         txt = f"""        {kind}(
             name: {sw_sy(tname)},
@@ -2268,15 +2275,16 @@ class Generator:
             # the Mach-O with plain `swift build`; xtool is not involved.
             libs = [f"    .executable(name: {sw_sy(name)}, targets: [{sw_sy(name)}])"]
         else:
-            libs = [f"    .library(name: {sw_sy(name)}, targets: [{sw_sy(name)}])"]
+            # The product carries the ObjC companion too, so it is linked.
+            members = ", ".join(sw_sy(t) for t in [name] + ([objc["name"]] if objc else []))
+            libs = [f"    .library(name: {sw_sy(name)}, targets: [{members}])"]
         libs += [f"    .library(name: {sw_sy(e['name'])}, targets: [{sw_sy(e['name'])}])"
                  for e in extensions]
         libs_txt = ",\n".join(libs)
         blocks = self.target_block(name, products, excludes, resources, swift,
-                                   executable=self.platform == "macos",
-                                   target_deps=[objc["name"]] if objc else ())
+                                   executable=self.platform == "macos")
         if objc:
-            blocks += self.objc_target_block(objc, products)
+            blocks += self.objc_target_block(objc, name, products)
         for e in extensions:
             blocks += self.target_block(e["name"], e["products"], e["excludes"],
                                         e["resources"], e["swift"])
