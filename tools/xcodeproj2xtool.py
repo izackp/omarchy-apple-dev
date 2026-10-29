@@ -406,6 +406,9 @@ class Generator:
         self.products_dir = products_dir or os.path.join(
             self.out_dir, ".build", "arm64-apple-ios", self.configuration.lower())
         self.swift_headers_dir = os.path.join(self.out_dir, "SwiftHeaders")
+        # iOS: also emit <App>-Link, an executable that links the app, so a
+        # plain `swift build` produces the binary (otherwise xtool links it).
+        self.link_executable = False
         self.target_name = target_name
         self.forced_bundle_id = bundle_id
         self.project = self.objs[self.data["rootObject"]]
@@ -550,9 +553,10 @@ class Generator:
 
     def resolved_ref_path(self, ref_id, parents):
         """Path of a PBXFileReference relative to the project dir, via its
-        parent group chain; None when it is not a '<group>'-rooted file."""
+        parent group chain; None when it is not a '<group>'-rooted file. An
+        XCVersionGroup (a versioned .xcdatamodeld) resolves like a file."""
         o = self.objs.get(ref_id, {})
-        if o.get("isa") != "PBXFileReference" or \
+        if o.get("isa") not in ("PBXFileReference", "XCVersionGroup") or \
                 o.get("sourceTree", "<group>") not in ("<group>", "SOURCE_ROOT") or \
                 not o.get("path"):
             return None
@@ -1254,6 +1258,12 @@ class Generator:
             self.warn(f"{len(ib_missing)} Interface Builder resource(s) excluded "
                       "- Linux ibtool cannot compile them: "
                       + ", ".join(ib_missing))
+            # For a packager that can compile them another way (a Mac ibtool).
+            listing = os.path.join(self.out_dir, "IBExcluded",
+                                   os.path.basename(target_dir) + ".txt")
+            os.makedirs(os.path.dirname(listing), exist_ok=True)
+            with open(listing, "w") as f:
+                f.writelines(os.path.join(self.proj_dir, p) + "\n" for p in ib_missing)
         missing_ui = self.excluded_storyboard_in_plist(ib_missing, infoplist_rel)
         if missing_ui:
             self.warn(f"Info.plist references excluded storyboard {missing_ui!r}; "
@@ -2672,10 +2682,29 @@ class Generator:
             libs = [f"    .library(name: {sw_sy(name)}, targets: [{members}])"]
         libs += [f"    .library(name: {sw_sy(e['name'])}, targets: [{sw_sy(e['name'])}])"
                  for e in extensions]
+        link_block = ""
+        if self.link_executable and self.platform != "macos":
+            # As xtool's builder package does: an empty C file, with the
+            # app's `main` (from @main, or main.m in the ObjC companion)
+            # coming from the targets it depends on.
+            link = f"{name}-Link"
+            os.makedirs(os.path.join(self.out_dir, "Link"), exist_ok=True)
+            open(os.path.join(self.out_dir, "Link", "stub.c"), "w").close()
+            libs.append(f"    .executable(name: {sw_sy(link)}, targets: [{sw_sy(link)}])")
+            link_block = f"""        .executableTarget(
+            name: {sw_sy(link)},
+            dependencies: [{sw_sy(objc["name"] if objc else name)}],
+            path: "Link",
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks"]),
+            ]
+        ),
+"""
         libs_txt = ",\n".join(libs)
         blocks = self.target_block(name, products, excludes, resources, swift,
                                    executable=self.platform == "macos",
                                    target_deps=fw_targets)
+        blocks += link_block
         if objc:
             blocks += self.objc_target_block(objc, name, products, fw_targets)
         blocks += fw_blocks
@@ -3701,6 +3730,9 @@ def main():
                     action="append", default=[],
                     help="enable these traits on a remote package (by its URL's "
                          "basename, e.g. SQLite.swift=SystemSQLite); repeatable")
+    ap.add_argument("--link-executable", action="store_true",
+                    help="iOS: add an <App>-Link executable product that links the "
+                         "app, so swift build produces its binary without xtool")
     args = ap.parse_args()
     if args.self_test:
         self_test()
@@ -3721,6 +3753,7 @@ def main():
         if not sep or not pkg or not traits:
             ap.error(f"--package-traits {spec!r}: expected PACKAGE=TRAIT[,TRAIT]")
         gen.package_traits[pkg.lower()] = [t for t in traits.split(",") if t]
+    gen.link_executable = args.link_executable
     gen.run()
 
 
