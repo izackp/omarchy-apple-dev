@@ -320,6 +320,8 @@ class Generator:
         # its default traits with `#if os(...)` sees the build host, not the
         # target, so a cross build from Linux can need them set explicitly.
         self.package_traits = {}
+        # Target name -> project-relative ObjC/C sources of its Sources phase.
+        self.objc_by_target = {}
         self.proj_dir = os.path.dirname(os.path.abspath(proj_path))
         self.data = parse_pbxproj(os.path.join(proj_path, "project.pbxproj"))
         self.objs = self.data["objects"]
@@ -460,16 +462,25 @@ class Generator:
         parent group chain; None when it is not a '<group>'-rooted file."""
         o = self.objs.get(ref_id, {})
         if o.get("isa") != "PBXFileReference" or \
-                o.get("sourceTree", "<group>") != "<group>" or not o.get("path"):
+                o.get("sourceTree", "<group>") not in ("<group>", "SOURCE_ROOT") or \
+                not o.get("path"):
             return None
-        parts = [o["path"]]
-        cur = parents.get(ref_id)
+        if o.get("sourceTree") == "SOURCE_ROOT":
+            return o["path"]
+        return self.join_group_chain([o["path"]], parents.get(ref_id), parents)
+
+    def join_group_chain(self, parts, cur, parents):
+        """Prefix parts with the paths of the groups from cur upward. A group
+        whose sourceTree is SOURCE_ROOT is anchored at the project dir, so the
+        walk stops there instead of adding its parents' paths."""
         seen = set()
         while cur and cur not in seen:
             seen.add(cur)
             g = self.objs.get(cur, {})
             if g.get("path"):
                 parts.append(g["path"])
+            if g.get("sourceTree") == "SOURCE_ROOT":
+                break
             cur = parents.get(cur)
         return os.path.join(*reversed(parts))
 
@@ -483,15 +494,7 @@ class Generator:
         if c.get("isa") != "PBXFileReference" or \
                 c.get("sourceTree", "<group>") != "<group>" or not c.get("path"):
             return None
-        parts = [c["path"]]
-        cur, seen = parents.get(group_id), set()
-        while cur and cur not in seen:
-            seen.add(cur)
-            g = self.objs.get(cur, {})
-            if g.get("path"):
-                parts.append(g["path"])
-            cur = parents.get(cur)
-        return os.path.join(*reversed(parts))
+        return self.join_group_chain([c["path"]], parents.get(group_id), parents)
 
     def phase_files(self, target, phase_isa):
         parents = self.build_parent_map()
@@ -530,16 +533,10 @@ class Generator:
         base = g.get("path") or g.get("name")
         if not base:
             return None
+        if g.get("sourceTree") == "SOURCE_ROOT":
+            return base
         parents = self.build_parent_map()
-        parts = [base]
-        cur, seen = parents.get(group_id), set()
-        while cur and cur not in seen:
-            seen.add(cur)
-            p = self.objs.get(cur, {})
-            if p.get("path"):
-                parts.append(p["path"])
-            cur = parents.get(cur)
-        return os.path.join(*reversed(parts))
+        return self.join_group_chain([base], parents.get(group_id), parents)
 
     def synced_group_plan(self, group_id, target_id, infoplist_rel, gpath):
         """Returns (swift_count, resources, excludes, ib_files) for one synced
@@ -1076,9 +1073,9 @@ class Generator:
                 else:
                     for m in members:
                         self.mirror_file(m, target_dir, symlinks)
-        if objc:
-            self.warn(f"{len(objc)} ObjC/C source files are not supported and were "
-                      f"excluded, e.g. {objc[0]}")
+        # run() builds the app target's ObjC files as a companion target; any
+        # other target's are still left out.
+        self.objc_by_target[target["name"]] = objc
         return res_files, src_anc
 
     def _plan_ib_resources(self, target_dir, ib_all, synced_ib_paths, src_anc,
@@ -1812,6 +1809,71 @@ class Generator:
             plistlib.dump(plist, f)
         return fname
 
+    def setting_list(self, layers, key):
+        """A list-valued build setting, expanded, without $(inherited)."""
+        raw = self.setting(layers, key)
+        if not raw:
+            return []
+        items = raw if isinstance(raw, list) else shlex.split(raw)
+        out = []
+        for item in items:
+            item = self.expand(item, layers).strip()
+            if item and item != "$(inherited)":
+                out.append(item)
+        return out
+
+    def plan_objc_target(self, app_name, objc, layers):
+        """SwiftPM cannot mix Swift and ObjC in one target, so the app's ObjC
+        sources become a companion target the app depends on, and the app's
+        Swift sees them through the bridging header, as in Xcode. Each source
+        is symlinked with the headers beside it, keeping the project's layout
+        so quoted imports of sibling headers resolve. Returns the target dict
+        for write_manifest; the app's -I paths are in its 'header_dirs'."""
+        tname = f"{app_name}ObjC"
+        target_dir = f"Sources/{tname}"
+        src_dirs = sorted({os.path.dirname(p) or "." for p in objc})
+        anc = os.path.commonpath(src_dirs) if len(src_dirs) > 1 else src_dirs[0]
+        anc = anc or "."
+        symlinks = []
+        for d in src_dirs:
+            for f in sorted(os.listdir(os.path.join(self.proj_dir, d))):
+                rel = os.path.join(d, f)
+                if rel in objc or os.path.splitext(f)[1].lower() == ".h":
+                    symlinks.append((os.path.join(target_dir, os.path.relpath(rel, anc)), rel))
+        self._materialize(tname, symlinks)
+        # SwiftPM requires a public headers dir; the app imports these headers
+        # through its bridging header, so the module itself exports nothing.
+        os.makedirs(os.path.join(self.out_dir, target_dir, "include"), exist_ok=True)
+        csettings = [f".headerSearchPath({sw_sy(os.path.relpath(d, anc))})"
+                     for d in src_dirs if d != anc]
+        for d in self.setting_list(layers, "GCC_PREPROCESSOR_DEFINITIONS"):
+            name, sep, value = d.partition("=")
+            csettings.append(f".define({sw_sy(name)}, to: {sw_sy(value)})" if sep
+                             else f".define({sw_sy(name)})")
+        if (self.setting(layers, "CLANG_ENABLE_OBJC_ARC") or "").upper() == "YES":
+            csettings.append('.unsafeFlags(["-fobjc-arc"])')
+        header_dirs = [os.path.join(self.proj_dir, d) for d in src_dirs]
+        return {"name": tname, "csettings": csettings, "header_dirs": header_dirs,
+                "count": len(objc)}
+
+    def bridging_flags(self, layers, header_dirs):
+        """unsafeFlags for the app's Swift: Xcode's bridging header and the
+        header search paths its imports resolve against."""
+        bh = self.setting(layers, "SWIFT_OBJC_BRIDGING_HEADER")
+        if not bh:
+            return []
+        bh = os.path.join(self.proj_dir, self.expand(bh, layers))
+        dirs = list(header_dirs)
+        for p in self.setting_list(layers, "HEADER_SEARCH_PATHS"):
+            p = p.rstrip("/")
+            recursive = p.endswith("/**")
+            p = p[:-3] if recursive else p
+            dirs.append(os.path.normpath(os.path.join(self.proj_dir, p)))
+        flags = ["-import-objc-header", bh]
+        for d in dict.fromkeys(dirs):
+            flags += ["-Xcc", f"-I{d}"]
+        return flags
+
     def _materialize(self, tname, symlinks):
         for link, dest in symlinks:
             lpath = os.path.join(self.out_dir, link)
@@ -1828,6 +1890,10 @@ class Generator:
         ename = ext["name"]
         elayers = self.target_merged(ext)
         esym, eexc, eres, eswift = self.plan_target_files(ext_id, ext)
+        eobjc = self.objc_by_target.get(ename)
+        if eobjc:
+            self.warn(f"{ename}: {len(eobjc)} ObjC/C source files are not supported "
+                      f"in extensions and were excluded, e.g. {eobjc[0]}")
         if not eswift:
             self.warn(f"extension {ename} has no Swift sources; skipped")
             return None, 0
@@ -1987,8 +2053,16 @@ class Generator:
             if entry:
                 extensions.append(entry)
 
+        objc_target = None
+        if self.objc_by_target.get(name):
+            objc_target = self.plan_objc_target(name, self.objc_by_target[name], layers)
+        bflags = self.bridging_flags(
+            layers, objc_target["header_dirs"] if objc_target else [])
+        if bflags:
+            app_swift = app_swift + [".unsafeFlags([" + ", ".join(sw_sy(f) for f in bflags) + "])"]
         self.write_manifest(name, layers, packages, app_products,
-                            excludes, resources, app_swift, extensions)
+                            excludes, resources, app_swift, extensions,
+                            objc=objc_target)
         # Pin the adapter to the versions Xcode builds with; without this
         # SwiftPM takes the newest version each requirement allows.
         resolved = self.resolved_file()
@@ -2096,11 +2170,21 @@ class Generator:
         self.icon_assets += len(seen)
         return len(seen)
 
+    def objc_target_block(self, objc):
+        cs = ",\n".join(f"                {c}" for c in objc["csettings"])
+        txt = f"""        .target(
+            name: {sw_sy(objc["name"])},
+"""
+        if cs:
+            txt += f"            cSettings: [\n{cs},\n            ]\n"
+        return txt + "        ),\n"
+
     def target_block(self, tname, deps, excludes, resources, swift,
-                     executable=False):
+                     executable=False, target_deps=()):
         prod_lines = "\n".join(
-            f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
-            for n, pk in deps)
+            [f"                {sw_sy(t)}," for t in target_deps] +
+            [f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
+             for n, pk in deps])
         kind = ".executableTarget" if executable else ".target"
         txt = f"""        {kind}(
             name: {sw_sy(tname)},
@@ -2120,7 +2204,7 @@ class Generator:
         return txt + "        ),\n"
 
     def write_manifest(self, name, layers, packages, products,
-                       excludes, resources, swift, extensions):
+                       excludes, resources, swift, extensions, objc=None):
         dt_key, tok, default, _bare = PLATFORMS[self.platform]
         plat = self.setting(layers, dt_key) or default
         plat = re.sub(r"[^0-9.]", "", self.expand(plat, layers)) or default
@@ -2136,7 +2220,10 @@ class Generator:
                  for e in extensions]
         libs_txt = ",\n".join(libs)
         blocks = self.target_block(name, products, excludes, resources, swift,
-                                   executable=self.platform == "macos")
+                                   executable=self.platform == "macos",
+                                   target_deps=[objc["name"]] if objc else ())
+        if objc:
+            blocks += self.objc_target_block(objc)
         for e in extensions:
             blocks += self.target_block(e["name"], e["products"], e["excludes"],
                                         e["resources"], e["swift"])
