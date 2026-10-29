@@ -331,6 +331,16 @@ def package_key(line):
     return m.group(2).lower() if m.group(1) == "url" else os.path.normpath(m.group(2))
 
 
+def package_name(line):
+    """The name a .product(package:) uses for a .package(...) declaration:
+    its name:, else the URL's basename."""
+    m = re.search(r'name:\s*"([^"]+)"', line)
+    if m:
+        return m.group(1)
+    m = re.search(r'url:\s*"([^"]+)"', line)
+    return package_label(m.group(1)) if m else line
+
+
 def framework_order(plans):
     """Module names with every framework after the frameworks it links."""
     order, seen = [], set()
@@ -2414,14 +2424,25 @@ class Generator:
         fw_blocks, fw_targets, fw_includes = "", [], []
         plans = self.plan_frameworks(target)
         for mod in framework_order(plans):
+            # A package the app already declares keeps the app's name for it;
+            # the framework's products are renamed to match.
+            have = {package_key(p): package_name(p) for p in packages}
+            rename = {}
+            for line in plans[mod]["packages"]:
+                key = package_key(line)
+                if key in have:
+                    rename[package_name(line)] = have[key]
+                else:
+                    packages.append(line)
+                    have[key] = package_name(line)
+            plans[mod]["products"] = [(n, rename.get(pk, pk))
+                                      for n, pk in plans[mod]["products"]]
             b, names = self.materialize_framework(plans[mod])
             fw_blocks += b
             fw_targets += names
             fw_includes += [os.path.join(self.out_dir, "Sources", n, "include")
                             for n in names if os.path.isdir(
                                 os.path.join(self.out_dir, "Sources", n, "include"))]
-            have = {package_key(p) for p in packages}
-            packages += [l for l in plans[mod]["packages"] if package_key(l) not in have]
         for sub in self._subprojects.values():
             for w in sub.warnings:
                 self.warn(w[len("warning: "):])
