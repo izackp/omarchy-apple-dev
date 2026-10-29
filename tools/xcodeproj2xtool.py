@@ -310,8 +310,9 @@ def sw_sy(v):
 
 class Generator:
     def __init__(self, proj_path, target_name=None, out_dir=None, bundle_id=None,
-                 workspace=None):
+                 workspace=None, configuration="Release"):
         self.proj_path = proj_path
+        self.configuration = configuration
         # The .xcworkspace the app is built through: its Package.resolved pins
         # the packages, and its other projects' local packages are visible.
         self.workspace = os.path.abspath(workspace) if workspace else None
@@ -350,9 +351,10 @@ class Generator:
 
     # -- settings ---------------------------------------------------------
 
-    def config_layers(self, cfg_list_id, config="Release"):
+    def config_layers(self, cfg_list_id, config=None):
         """One configuration of a configuration list: its xcconfig's path
         relative to the project dir (when it has one), then its pbxproj settings."""
+        config = config or self.configuration
         layers = []
         cl = self.objs.get(cfg_list_id)
         for cfg_id in (cl or {}).get("buildConfigurations", []):
@@ -377,7 +379,8 @@ class Generator:
                 for l in self.config_layers(cfg_list_id)]
 
     def target_merged(self, target):
-        """Release settings: project xcconfig < project < target xcconfig < target."""
+        """The configuration's settings (Release unless --configuration):
+        project xcconfig < project < target xcconfig < target."""
         layers = self.config_settings(self.project.get("buildConfigurationList"))
         layers += self.config_settings(target.get("buildConfigurationList"))
         return layers
@@ -3234,6 +3237,8 @@ def main():
                          "rebased (extension IDs that start with the app's "
                          "original ID keep their suffix; the rest get '.' + "
                          "the product name with spaces removed)")
+    ap.add_argument("--configuration", default="Release",
+                    help="build configuration whose settings to use (default: Release)")
     ap.add_argument("--workspace", metavar="PATH",
                     help="the .xcworkspace the app builds through: use its "
                          "Package.resolved and its other projects' local packages")
@@ -3254,7 +3259,7 @@ def main():
             os.path.join(args.workspace, "contents.xcworkspacedata")):
         ap.error(f"{args.workspace} is not an .xcworkspace directory")
     gen = Generator(args.project, args.target, args.out, args.bundle_id,
-                    workspace=args.workspace)
+                    workspace=args.workspace, configuration=args.configuration)
     for spec in args.package_traits:
         pkg, sep, traits = spec.partition("=")
         if not sep or not pkg or not traits:
