@@ -297,6 +297,21 @@ def package_label(url):
     return base
 
 
+def balanced_tail(text, start):
+    """The text from start to the ')' closing the call it sits in, so a
+    requirement like `from: Version(5, 9, 3)` survives whole."""
+    depth = 0
+    for i in range(start, len(text)):
+        c = text[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            if depth == 0:
+                return text[start:i].strip()
+            depth -= 1
+    return text[start:].strip()
+
+
 def bump_minor(version):
     m = re.match(r"^(\d+)\.(\d+)", version)
     if not m:
@@ -339,6 +354,13 @@ class Generator:
         self.target_name = target_name
         self.forced_bundle_id = bundle_id
         self.project = self.objs[self.data["rootObject"]]
+        # Settings Xcode defines itself; run() adds TARGET_NAME.
+        self.builtin_settings = {
+            "PROJECT_DIR": self.proj_dir, "SRCROOT": self.proj_dir,
+            "SOURCE_ROOT": self.proj_dir,
+            "PROJECT_NAME": os.path.splitext(os.path.basename(
+                os.path.normpath(proj_path)))[0],
+        }
 
     def warn(self, msg):
         line = f"warning: {msg}"
@@ -404,6 +426,8 @@ class Generator:
             for l in reversed(layers):
                 if name in l:
                     return self.expand(l[name], layers, _depth + 1)
+            if name in self.builtin_settings:
+                return self.builtin_settings[name]
             return m.group(0)
 
         return re.sub(r"\$\(([^)]+)\)", rep, value)
@@ -941,11 +965,12 @@ class Generator:
             text = open(mf, encoding="utf-8", errors="replace").read()
             url_by_name = {}
             reqs = {}
-            for m in re.finditer(r'\.package\(\s*url:\s*"([^"]+)"\s*,\s*([^)]+)\)', text):
+            for m in re.finditer(r'\.package\(\s*url:\s*"([^"]+)"\s*,\s*', text):
                 url = m.group(1)
+                req = balanced_tail(text, m.end())
                 for key in (package_label(url), package_label(url).lower()):
                     url_by_name[key] = url
-                    reqs[key] = m.group(2).strip()
+                    reqs[key] = req
             prod_to_pkg = {}
             for m in re.finditer(r'\.product\(\s*name:\s*"([^"]+)"\s*,\s*package:\s*"([^"]+)"', text):
                 prod_to_pkg[m.group(1)] = m.group(2)
@@ -1823,8 +1848,14 @@ class Generator:
         out = []
         for item in items:
             item = self.expand(item, layers).strip()
-            if item and item != "$(inherited)":
-                out.append(item)
+            if not item or item == "$(inherited)":
+                continue
+            if "$(" in item:
+                # SwiftPM rejects a setting with an unexpanded reference.
+                self.warn(f"{key}: {item!r} uses a setting the converter "
+                          "cannot resolve; skipped")
+                continue
+            out.append(item)
         return out
 
     def plan_objc_target(self, app_name, objc, layers):
@@ -1867,13 +1898,23 @@ class Generator:
         bh = self.setting(layers, "SWIFT_OBJC_BRIDGING_HEADER")
         if not bh:
             return []
-        bh = os.path.join(self.proj_dir, self.expand(bh, layers))
+        bh = self.expand(bh, layers)
+        if "$(" in bh:
+            self.warn(f"SWIFT_OBJC_BRIDGING_HEADER {bh!r} uses a setting the "
+                      "converter cannot resolve; not passed to Swift")
+            return []
+        bh = os.path.join(self.proj_dir, bh)
         dirs = list(header_dirs)
         for p in self.setting_list(layers, "HEADER_SEARCH_PATHS"):
             p = p.rstrip("/")
             recursive = p.endswith("/**")
-            p = p[:-3] if recursive else p
-            dirs.append(os.path.normpath(os.path.join(self.proj_dir, p)))
+            p = os.path.normpath(os.path.join(self.proj_dir, p[:-3] if recursive else p))
+            dirs.append(p)
+            if recursive and os.path.isdir(p):
+                # Xcode's `path/**` searches every directory below path too.
+                for base, sub, _files in os.walk(p):
+                    sub[:] = sorted(d for d in sub if not d.startswith("."))
+                    dirs += [os.path.join(base, d) for d in sub]
         flags = ["-import-objc-header", bh]
         for d in dict.fromkeys(dirs):
             flags += ["-Xcc", f"-I{d}"]
@@ -2022,6 +2063,7 @@ class Generator:
         target_id, self.target = self.pick_target()
         target = self.target
         name = target["name"]
+        self.builtin_settings["TARGET_NAME"] = name
         layers = self.target_merged(target)
         self.platform = self.platform_of(layers)
         dev_region = self.project.get("developmentRegion")
@@ -2175,11 +2217,17 @@ class Generator:
         self.icon_assets += len(seen)
         return len(seen)
 
-    def objc_target_block(self, objc):
+    def objc_target_block(self, objc, deps):
         cs = ",\n".join(f"                {c}" for c in objc["csettings"])
         txt = f"""        .target(
             name: {sw_sy(objc["name"])},
 """
+        # In Xcode the app's ObjC sees every package product the app links
+        # (a C package's public headers, e.g. <GCDAsyncUdpSocket.h>).
+        if deps:
+            prods = "\n".join(f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
+                               for n, pk in deps)
+            txt += f"            dependencies: [\n{prods}\n            ],\n"
         if cs:
             txt += f"            cSettings: [\n{cs},\n            ]\n"
         return txt + "        ),\n"
@@ -2228,7 +2276,7 @@ class Generator:
                                    executable=self.platform == "macos",
                                    target_deps=[objc["name"]] if objc else ())
         if objc:
-            blocks += self.objc_target_block(objc)
+            blocks += self.objc_target_block(objc, products)
         for e in extensions:
             blocks += self.target_block(e["name"], e["products"], e["excludes"],
                                         e["resources"], e["swift"])
