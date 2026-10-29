@@ -242,6 +242,16 @@ def c99_identifier(name):
     return "_" + ident if ident[:1].isdigit() else ident
 
 
+# $(NAME:modifier) operators Xcode applies to a setting's value.
+SETTING_MODIFIERS = {
+    "c99extidentifier": c99_identifier,
+    "identifier": c99_identifier,
+    "rfc1034identifier": lambda v: re.sub(r"[^A-Za-z0-9.-]", "-", v),
+    "lower": str.lower,
+    "upper": str.upper,
+}
+
+
 def ibtool_compiles(path):
     """Whether the repo's ibtool compiles one Interface Builder source.
 
@@ -312,6 +322,32 @@ def balanced_tail(text, start):
     return text[start:].strip()
 
 
+def package_key(line):
+    """What makes two .package(...) declarations the same package: the URL,
+    or the path a path package points at."""
+    m = re.search(r'(url|path):\s*"([^"]+)"', line)
+    if not m:
+        return line
+    return m.group(2).lower() if m.group(1) == "url" else os.path.normpath(m.group(2))
+
+
+def framework_order(plans):
+    """Module names with every framework after the frameworks it links."""
+    order, seen = [], set()
+
+    def visit(mod):
+        if mod in seen:
+            return
+        seen.add(mod)
+        for d in plans[mod]["deps"]:
+            visit(d)
+        order.append(mod)
+
+    for mod in sorted(plans):
+        visit(mod)
+    return order
+
+
 def bump_minor(version):
     m = re.match(r"^(\d+)\.(\d+)", version)
     if not m:
@@ -338,6 +374,10 @@ class Generator:
         self.package_traits = {}
         # Target name -> project-relative ObjC/C sources of its Sources phase.
         self.objc_by_target = {}
+        self._project_header_dirs = None
+        self._subprojects = {}
+        # Framework module -> the SwiftPM targets generated for it.
+        self.framework_targets = {}
         self.proj_dir = os.path.dirname(os.path.abspath(proj_path))
         self.data = parse_pbxproj(os.path.join(proj_path, "project.pbxproj"))
         self.objs = self.data["objects"]
@@ -419,16 +459,25 @@ class Generator:
         if _depth > 10 or "$(" not in value:
             return value
 
-        def rep(m):
-            name = m.group(1)
-            if name == "inherited":
-                return ""
+        def lookup(name):
             for l in reversed(layers):
                 if name in l:
                     return self.expand(l[name], layers, _depth + 1)
-            if name in self.builtin_settings:
-                return self.builtin_settings[name]
-            return m.group(0)
+            return self.builtin_settings.get(name)
+
+        def rep(m):
+            name, *mods = m.group(1).split(":")
+            if name == "inherited":
+                return ""
+            val = lookup(name)
+            if val is None:
+                return m.group(0)
+            for mod in mods:
+                fn = SETTING_MODIFIERS.get(mod)
+                if fn is None:
+                    return m.group(0)
+                val = fn(val)
+            return val
 
         return re.sub(r"\$\(([^)]+)\)", rep, value)
 
@@ -1888,6 +1937,9 @@ class Generator:
                              else f".define({sw_sy(name)})")
         if (self.setting(layers, "CLANG_ENABLE_OBJC_ARC") or "").upper() == "YES":
             csettings.append('.unsafeFlags(["-fobjc-arc"])')
+        # Xcode's header map: any project header by bare name.
+        csettings.append(".unsafeFlags([" + ", ".join(
+            sw_sy(f"-I{d}") for d in self.project_header_dirs()) + "])")
         header_dirs = [os.path.join(self.proj_dir, d) for d in src_dirs]
         return {"name": tname, "csettings": csettings, "header_dirs": header_dirs,
                 "count": len(objc)}
@@ -1919,6 +1971,238 @@ class Generator:
         for d in dict.fromkeys(dirs):
             flags += ["-Xcc", f"-I{d}"]
         return flags
+
+    def project_header_dirs(self):
+        """Absolute dirs of every header the project lists. Xcode's header
+        map makes any of them importable by bare name ("RKLog.h") from
+        anywhere in the project; -I for each dir is the closest SwiftPM gets."""
+        if self._project_header_dirs is None:
+            parents = self.build_parent_map()
+            dirs = {}
+            for oid, o in self.objs.items():
+                if o.get("isa") == "PBXFileReference" and \
+                        os.path.splitext(o.get("path", ""))[1] in (".h", ".hh", ".hpp"):
+                    rel = self.resolved_ref_path(oid, parents)
+                    d = rel and os.path.dirname(os.path.join(self.proj_dir, rel))
+                    if d and os.path.isdir(d):
+                        dirs[os.path.normpath(d)] = True
+            self._project_header_dirs = sorted(dirs)
+        return self._project_header_dirs
+
+    # -- frameworks from sub-projects ----------------------------------------
+
+    def subproject_frameworks(self, target):
+        """[(xcodeproj path, target id)] for each framework target that
+        target depends on or links from a sub-project it references."""
+        parents = self.build_parent_map()
+        out = []
+
+        def add(proxy_id):
+            px = self.objs.get(proxy_id) or {}
+            portal_id = px.get("containerPortal")
+            portal = self.objs.get(portal_id) or {}
+            if not portal.get("path", "").endswith(".xcodeproj"):
+                return
+            rel = self.resolved_ref_path(portal_id, parents)
+            if not rel:
+                return
+            proj = os.path.normpath(os.path.join(self.proj_dir, rel))
+            sub = self.subproject(proj)
+            gid = px.get("remoteGlobalIDString")
+            if px.get("proxyType") == 2:  # the product, not the target
+                gid = next((oid for oid, o in sub.objs.items()
+                            if o.get("isa") == "PBXNativeTarget"
+                            and o.get("productReference") == gid), None)
+            t = sub.objs.get(gid) or {}
+            if t.get("productType") == "com.apple.product-type.framework" and \
+                    (proj, gid) not in out:
+                out.append((proj, gid))
+
+        for d in target.get("dependencies", []):
+            add((self.objs.get(d) or {}).get("targetProxy"))
+        for ph in target.get("buildPhases", []):
+            p = self.objs.get(ph) or {}
+            if p.get("isa") != "PBXFrameworksBuildPhase":
+                continue
+            for bf in p.get("files", []):
+                ref = self.objs.get((self.objs.get(bf) or {}).get("fileRef")) or {}
+                if ref.get("isa") == "PBXReferenceProxy":
+                    add(ref.get("remoteRef"))
+        return out
+
+    def linked_framework_names(self, target):
+        """Names (without .framework) of the frameworks target links that
+        are build products, e.g. RestKit from a sibling sub-project."""
+        names = []
+        for ph in target.get("buildPhases", []):
+            p = self.objs.get(ph) or {}
+            if p.get("isa") != "PBXFrameworksBuildPhase":
+                continue
+            for bf in p.get("files", []):
+                ref = self.objs.get((self.objs.get(bf) or {}).get("fileRef")) or {}
+                path = ref.get("path") or ref.get("name") or ""
+                if path.endswith(".framework") and ref.get("sourceTree") != "SDKROOT":
+                    names.append(os.path.basename(path)[:-len(".framework")])
+        return names
+
+    def subproject(self, proj):
+        """A Generator for a referenced sub-project, sharing this adapter."""
+        if proj not in self._subprojects:
+            sub = Generator(proj, out_dir=self.out_dir, workspace=self.workspace,
+                            configuration=self.configuration)
+            sub.package_traits = self.package_traits
+            sub.platform = self.platform
+            self._subprojects[proj] = sub
+        return self._subprojects[proj]
+
+    def plan_frameworks(self, target):
+        """Every framework target reachable from target through sub-projects
+        (and the frameworks those link), as module plans keyed by module
+        name, in dependency order."""
+        plans, queue = {}, list(self.subproject_frameworks(target))
+        seen = set()
+        while queue:
+            proj, tid = queue.pop(0)
+            if (proj, tid) in seen:
+                continue
+            seen.add((proj, tid))
+            sub = self.subproject(proj)
+            plan = sub.plan_framework_module(sub.objs[tid])
+            plans[plan["module"]] = plan
+            queue += sub.subproject_frameworks(sub.objs[tid])
+        for plan in plans.values():
+            plan["deps"] = [n for n in plan["links"] if n in plans and n != plan["module"]]
+        return plans
+
+    def plan_framework_module(self, target):
+        """Sources, public headers and settings of one framework target."""
+        self.builtin_settings["TARGET_NAME"] = target["name"]
+        layers = self.target_merged(target)
+        product = self.expand(self.setting(layers, "PRODUCT_NAME") or target["name"], layers)
+        module = c99_identifier(self.expand(
+            self.setting(layers, "PRODUCT_MODULE_NAME") or product, layers))
+        swift, objc = [], []
+        for _ref, p in self.phase_files(target, "PBXSourcesBuildPhase"):
+            ext = os.path.splitext(p)[1].lower()
+            absp = os.path.normpath(os.path.join(self.proj_dir, p))
+            if ext == ".swift":
+                swift.append(absp)
+            elif ext in OBJC_EXTS:
+                objc.append(absp)
+        public = []
+        for ph in target.get("buildPhases", []):
+            p = self.objs.get(ph) or {}
+            if p.get("isa") != "PBXHeadersBuildPhase":
+                continue
+            parents = self.build_parent_map()
+            for bf in p.get("files", []):
+                b = self.objs.get(bf) or {}
+                if "Public" not in b.get("settings", {}).get("ATTRIBUTES", []):
+                    continue
+                rel = self.resolved_ref_path(b.get("fileRef"), parents)
+                if rel:
+                    public.append(os.path.normpath(os.path.join(self.proj_dir, rel)))
+        rels = [os.path.relpath(s, self.proj_dir) for s in swift]
+        packages, products = self.plan_packages(target, rels) if swift else ([], [])
+        defines = self.setting_list(layers, "GCC_PREPROCESSOR_DEFINITIONS")
+        prefix = self.setting(layers, "GCC_PREFIX_HEADER")
+        prefix = prefix and os.path.join(self.proj_dir, self.expand(prefix, layers))
+        return {
+            "module": module, "swift": swift, "objc": objc, "public": public,
+            "header_dirs": self.project_header_dirs(),
+            "arc": (self.setting(layers, "CLANG_ENABLE_OBJC_ARC") or "").upper() == "YES",
+            "defines": defines, "prefix": prefix if prefix and "$(" not in prefix else None,
+            "swift_settings": self.swift_settings(layers) if swift else [],
+            "packages": packages, "products": products,
+            "links": self.linked_framework_names(target),
+        }
+
+    def materialize_framework(self, plan):
+        """Write a framework module's target dirs. A pure ObjC framework is
+        one target named after the module; a mixed one is a Swift target
+        named after the module plus <Module>ObjC, split like the app.
+        Returns (target blocks text, [target names the app depends on])."""
+        mod = plan["module"]
+        objc_name = f"{mod}ObjC" if plan["swift"] else mod
+        blocks, names = "", []
+        fw_deps = []
+        for d in plan["deps"]:
+            fw_deps += self.framework_targets.get(d, [])
+
+        def mirror(tname, files):
+            anc = os.path.commonpath([os.path.dirname(f) for f in files])
+            links = [(os.path.join(f"Sources/{tname}", os.path.relpath(f, anc)), f)
+                     for f in files]
+            self._materialize(tname, links)
+
+        if plan["objc"] or plan["public"]:
+            inc = os.path.join(self.out_dir, "Sources", objc_name, "include", mod)
+            os.makedirs(inc, exist_ok=True)
+            for h in plan["public"]:
+                link = os.path.join(inc, os.path.basename(h))
+                if os.path.lexists(link):
+                    self.warn(f"{mod}: two public headers named {os.path.basename(h)!r}; "
+                              f"kept the first")
+                    continue
+                os.symlink(h, link)
+            if plan["swift"]:
+                # <Mod/Mod-Swift.h> as frameworks expose it; SwiftPM generates
+                # Mod-Swift.h on the Swift target's include path.
+                with open(os.path.join(inc, f"{mod}-Swift.h"), "w") as f:
+                    f.write(f"#import <{mod}-Swift.h>\n")
+            if plan["objc"]:
+                mirror(objc_name, plan["objc"])
+            else:
+                with open(os.path.join(self.out_dir, "Sources", objc_name, "empty.m"), "w") as f:
+                    f.write("// headers-only module\n")
+            flags = [f"-I{d}" for d in plan["header_dirs"]]
+            if plan["arc"]:
+                flags.append("-fobjc-arc")
+            if plan["prefix"]:
+                flags += ["-include", plan["prefix"]]
+            cs = []
+            for d in plan["defines"]:
+                n, sep, v = d.partition("=")
+                cs.append(f".define({sw_sy(n)}, to: {sw_sy(v)})" if sep else f".define({sw_sy(n)})")
+            cs.append(".unsafeFlags([" + ", ".join(sw_sy(f) for f in flags) + "])")
+            deps = ([sw_sy(mod)] if plan["swift"] else []) + [sw_sy(t) for t in fw_deps] + \
+                [f".product(name: {sw_sy(n)}, package: {sw_sy(pk)})" for n, pk in plan["products"]]
+            blocks += self._raw_target_block(objc_name, deps, cs=cs)
+            names.append(objc_name)
+
+        if plan["swift"]:
+            mirror(mod, plan["swift"])
+            umbrella = next((h for h in plan["public"]
+                             if os.path.basename(h) == f"{mod}.h"), None)
+            flags = []
+            if umbrella:
+                flags += ["-import-objc-header", umbrella]
+            # The module's own <Mod/Header.h> imports resolve through the
+            # ObjC target's include dir.
+            for d in plan["header_dirs"] + [
+                    os.path.join(self.out_dir, "Sources", objc_name, "include")]:
+                flags += ["-Xcc", f"-I{d}"]
+            ss = plan["swift_settings"] + [
+                ".unsafeFlags([" + ", ".join(sw_sy(f) for f in flags) + "])"]
+            deps = [sw_sy(t) for t in fw_deps] + \
+                [f".product(name: {sw_sy(n)}, package: {sw_sy(pk)})" for n, pk in plan["products"]]
+            blocks += self._raw_target_block(mod, deps, swift=ss)
+            names.insert(0, mod)
+        self.framework_targets[mod] = names
+        return blocks, names
+
+    @staticmethod
+    def _raw_target_block(name, deps, cs=None, swift=None):
+        txt = f"        .target(\n            name: {sw_sy(name)},\n"
+        if deps:
+            txt += "            dependencies: [\n" + "".join(
+                f"                {d},\n" for d in deps) + "            ],\n"
+        if cs:
+            txt += "            cSettings: [\n" + "".join(
+                f"                {c},\n" for c in cs) + "            ],\n"
+        if swift:
+            txt += f"            swiftSettings: [{', '.join(swift)}],\n"
+        return txt + "        ),\n"
 
     def _materialize(self, tname, symlinks):
         for link, dest in symlinks:
@@ -2100,16 +2384,34 @@ class Generator:
             if entry:
                 extensions.append(entry)
 
+        # Frameworks the app builds from sub-projects (RestKit.xcodeproj ...)
+        # become targets of this package, dependencies first.
+        fw_blocks, fw_targets, fw_includes = "", [], []
+        plans = self.plan_frameworks(target)
+        for mod in framework_order(plans):
+            b, names = self.materialize_framework(plans[mod])
+            fw_blocks += b
+            fw_targets += names
+            fw_includes += [os.path.join(self.out_dir, "Sources", n, "include")
+                            for n in names if os.path.isdir(
+                                os.path.join(self.out_dir, "Sources", n, "include"))]
+            have = {package_key(p) for p in packages}
+            packages += [l for l in plans[mod]["packages"] if package_key(l) not in have]
+        for sub in self._subprojects.values():
+            for w in sub.warnings:
+                self.warn(w[len("warning: "):])
         objc_target = None
         if self.objc_by_target.get(name):
             objc_target = self.plan_objc_target(name, self.objc_by_target[name], layers)
         bflags = self.bridging_flags(
-            layers, objc_target["header_dirs"] if objc_target else [])
+            layers, (objc_target["header_dirs"] if objc_target else [])
+            + self.project_header_dirs() + fw_includes)
         if bflags:
             app_swift = app_swift + [".unsafeFlags([" + ", ".join(sw_sy(f) for f in bflags) + "])"]
         self.write_manifest(name, layers, packages, app_products,
                             excludes, resources, app_swift, extensions,
-                            objc=objc_target)
+                            objc=objc_target, fw_blocks=fw_blocks,
+                            fw_targets=fw_targets)
         # Pin the adapter to the versions Xcode builds with; without this
         # SwiftPM takes the newest version each requirement allows.
         resolved = self.resolved_file()
@@ -2217,7 +2519,7 @@ class Generator:
         self.icon_assets += len(seen)
         return len(seen)
 
-    def objc_target_block(self, objc, swift_target, deps):
+    def objc_target_block(self, objc, swift_target, deps, target_deps=()):
         cs = ",\n".join(f"                {c}" for c in objc["csettings"])
         # The ObjC depends on the app's Swift, not the other way round: Swift
         # only needs the ObjC headers (the bridging header gives it those),
@@ -2226,7 +2528,7 @@ class Generator:
         # and a cycle between two is rejected. In Xcode the app's ObjC also
         # sees every package product the app links (a C package's public
         # headers, e.g. <GCDAsyncUdpSocket.h>).
-        lines = [f"                {sw_sy(swift_target)},"] + [
+        lines = [f"                {sw_sy(t)}," for t in [swift_target, *target_deps]] + [
             f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
             for n, pk in deps]
         prods = "\n".join(lines)
@@ -2241,10 +2543,11 @@ class Generator:
         return txt + "        ),\n"
 
     def target_block(self, tname, deps, excludes, resources, swift,
-                     executable=False):
+                     executable=False, target_deps=()):
         prod_lines = "\n".join(
-            f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
-            for n, pk in deps)
+            [f"                {sw_sy(t)}," for t in target_deps] +
+            [f"                .product(name: {sw_sy(n)}, package: {sw_sy(pk)}),"
+             for n, pk in deps])
         kind = ".executableTarget" if executable else ".target"
         txt = f"""        {kind}(
             name: {sw_sy(tname)},
@@ -2264,7 +2567,8 @@ class Generator:
         return txt + "        ),\n"
 
     def write_manifest(self, name, layers, packages, products,
-                       excludes, resources, swift, extensions, objc=None):
+                       excludes, resources, swift, extensions, objc=None,
+                       fw_blocks="", fw_targets=()):
         dt_key, tok, default, _bare = PLATFORMS[self.platform]
         plat = self.setting(layers, dt_key) or default
         plat = re.sub(r"[^0-9.]", "", self.expand(plat, layers)) or default
@@ -2282,9 +2586,11 @@ class Generator:
                  for e in extensions]
         libs_txt = ",\n".join(libs)
         blocks = self.target_block(name, products, excludes, resources, swift,
-                                   executable=self.platform == "macos")
+                                   executable=self.platform == "macos",
+                                   target_deps=fw_targets)
         if objc:
-            blocks += self.objc_target_block(objc, name, products)
+            blocks += self.objc_target_block(objc, name, products, fw_targets)
+        blocks += fw_blocks
         for e in extensions:
             blocks += self.target_block(e["name"], e["products"], e["excludes"],
                                         e["resources"], e["swift"])
