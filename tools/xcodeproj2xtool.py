@@ -2009,7 +2009,7 @@ class Generator:
             proj = os.path.normpath(os.path.join(self.proj_dir, rel))
             sub = self.subproject(proj)
             gid = px.get("remoteGlobalIDString")
-            if px.get("proxyType") == 2:  # the product, not the target
+            if str(px.get("proxyType")) == "2":  # the product, not the target
                 gid = next((oid for oid, o in sub.objs.items()
                             if o.get("isa") == "PBXNativeTarget"
                             and o.get("productReference") == gid), None)
