@@ -660,6 +660,8 @@ def image(x, name, catalog=None, ref=None):
         x.put(o, "UIImageHeight", x.b.float32(0.0))
         x.put(o, "UIResourceName", x.s(name))
         x.put(o, "UISystemSymbolResourceName", x.s(name))
+        if ref is not None and ref.get("variableValue") is not None:
+            x.put(o, "UIImageVariableValue", x.b.float64(float(ref.get("variableValue"))))
         cfg = symbol_configuration(x, ref, "symbolScale", "symbolWeight") if ref is not None else None
         x.put(o, "UISymbolImageConfiguration", cfg or (N.NIL, None))
     elif catalog is None:
@@ -1211,6 +1213,11 @@ def _guides(x, el, o):
             x.put(k, "UIKeyboardLayoutGuideFollowsUndocked", NO)
             x.ids[g.get("id")] = k
             st["guides"].append(("UIKeyboardLayoutGuide", k))
+        elif (g.tag == "viewLayoutGuide" and g.get("key") in ("contentLayoutGuide", "frameLayoutGuide")
+              and g.get("id") not in x.constraint_items):
+            # A scroll view's unused content/frame guide: only a placeholder
+            # in the objects list (VCSettings golden).
+            st["guides"].append(("UILayoutGuide", None))
         elif g.tag in ("viewLayoutGuide", "keyboardLayoutGuide"):
             _fail(g, f"layout guide {g.get('key')}", x.where)
 
