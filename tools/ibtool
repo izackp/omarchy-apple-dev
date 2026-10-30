@@ -43,6 +43,8 @@ SYSTEM_COLORS = {  # name -> built-in spec, preferred over document resources
     # synthesized table/clear colors (oracle: selectionStyle="none" cells)
     "tableCellPlainBackgroundColor": ("white", 1.0, 1.0),
     "clearColor": ("white", 0.0, 0.0),
+    "whiteColor": ("white", 1.0, 1.0),
+    "blackColor": ("white", 0.0, 1.0),
     "systemBackgroundColor": ("white", 1.0, 1.0),
     "labelColor": ("white", 0.0, 1.0),
     # not in document resources (gold Inspector tableView background)
@@ -358,9 +360,13 @@ def build_color_el(b, el, where, resources, named):
         return build_color(b, el.get("systemColor"), where, resources)
     if el.get("name") is not None:
         return build_named_color(b, el.get("name"), named, where)
-    if (el.get("white") == "0.0" and el.get("alpha") == "0.0"
-            and el.get("customColorSpace") == "genericGamma22GrayColorSpace"):
-        return build_color(b, "clearColor", where)
+    if el.get("xcode11CocoaTouchSystemColor") is not None:
+        # Apple's ibtool 27 uses the Xcode 11 name (PhotoDay Dashboard launch screen).
+        return build_color(b, el.get("xcode11CocoaTouchSystemColor"), where, resources)
+    gray = {("0.0", "0.0"): "clearColor", ("1", "1"): "whiteColor", ("0.0", "1"): "blackColor"}
+    if (el.get("customColorSpace") == "genericGamma22GrayColorSpace"
+            and (el.get("white"), el.get("alpha")) in gray):
+        return build_color(b, gray[(el.get("white"), el.get("alpha"))], where)
     if el.get("red") is not None:
         return build_rgb_color(b, el, where)
     if el.get("white") is not None and el.get("customColorSpace") == "calibratedWhite":
@@ -2451,8 +2457,9 @@ def _background_configuration(b, style, where):
 
 
 def _scene_image_view(sb, el, where, resources, named, id_map):
-    """Storyboard imageView: no UIOpaque (FeedCell header golden); tint before
-    DoesNotTranslate; image and preferredSymbolConfiguration last."""
+    """Storyboard imageView: opaque unless opaque="NO" or it has a symbol
+    configuration (FeedCell header golden; PhotoDay CaptureQR launch screen);
+    tint before DoesNotTranslate; image and preferredSymbolConfiguration last."""
     b = sb.b
     (bx, by, bw, bh), (cx, cy) = _bounds_center(el)
     o = b.new("UIImageView")
@@ -2461,6 +2468,8 @@ def _scene_image_view(sb, el, where, resources, named, id_map):
     o.add("UIBounds", *b.geom(bx, by, bw, bh))
     o.add("UICenter", *b.geom(cx, cy))
     o.add("UIDeepDrawRect", *b.boolean(False))
+    if el.get("opaque") != "NO" and el.find("preferredSymbolConfiguration") is None:
+        o.add("UIOpaque", *b.boolean(False))
     if el.get("userInteractionEnabled") is not None:
         o.add("UIUserInteractionDisabled", *b.boolean(el.get("userInteractionEnabled") != "NO"))
     if el.get("multipleTouchEnabled") is not None:
@@ -3378,6 +3387,10 @@ def _vc_swapper_values(sb, swapper, vc_el, where, parent_ref):
         if vc_el.get("clearsSelectionOnViewWillAppear") != "NO":
             raise XibError(f"clearsSelectionOnViewWillAppear unsupported ({where})")
         swapper.add("UIClearsSelectionOnViewWillAppear", *b.boolean(True))
+    if vc_el.get("automaticallyAdjustsScrollViewInsets") is not None:
+        if vc_el.get("automaticallyAdjustsScrollViewInsets") != "NO":
+            raise XibError(f"automaticallyAdjustsScrollViewInsets unsupported ({where})")
+        swapper.add("UIKeyAutomaticallyAdjustsScrollViewInsets", *b.int8(0))
     orig = VC_ORIGINAL_CLASS[vc_el.tag]
     swapper.add("UIClassName", *b.ref(b.string(_swift_class(vc_el) or orig)))
     swapper.add("UIOriginalClassName", *b.ref(b.string(orig)))
@@ -3784,6 +3797,14 @@ def _scene_view_resize(b, view, vc_el, root_el, device):
         # device's size instead of 1000 x 1000; its subviews keep 1000 x 1000
         # (Runner LaunchScreen compiled at 13.0, 15.0 and 16.6 against 17.0 and 26.0).
         device = PRE_17_FRAMELESS_SCENE_SIZE
+    elif device is None and root_el.tag == "view" and root_el.find("rect[@key='frame']") is not None \
+            and MIN_DEPLOYMENT is not None and MIN_DEPLOYMENT < (17, 0):
+        # Below iOS 17 a storyboard without a <device> lays its scene views out
+        # on the 600 x 600 universal canvas (PhotoDay Dashboard launch screen
+        # at 15.0; 375 x 667 kept at 17.0).
+        if root_el.find("subviews") is not None:
+            raise XibError("scene view with subviews on the 600 x 600 canvas not supported")
+        device = (600, 600)
     if device is not None and \
             vc_el.find("freeformSimulatedSizeMetrics") is None:
         w, h = device
@@ -4222,7 +4243,8 @@ def _scroll_common(b, o, el, where, delegate_first=False):
 
 DEVICE_SIZES = {"retina4": (320, 568), "retina4_0": (320, 480), "retina4_7": (375, 667),
                 "retina5_5": (414, 736), "retina5_9": (320, 568), "retina6_1": (414, 896), "retina6_3": (393, 852),
-                "retina6_5": (414, 896)}
+                "retina6_5": (414, 896), "retina6_0": (390, 844), "retina6_12": (393, 852),
+                "retina6_72": (430, 932)}
 
 
 def _scroll_view_base(b, o, el, where, resources, device=None):

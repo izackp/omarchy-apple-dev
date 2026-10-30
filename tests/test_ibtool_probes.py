@@ -45,6 +45,11 @@ BYTE_IDENTICAL = [
 ]
 # Probes compiled for another deployment target than FLAGS' 17.0.
 DEPLOYMENT = {"resize-device": "16.9"}
+# Storyboard probes, compiled into a --compilation-directory at their deployment
+# target: below iOS 17.0 a scene without a <device> lays its framed root view out
+# at 600x600 (scene-canvas); a storyboard imageView is opaque, and
+# automaticallyAdjustsScrollViewInsets="NO" lands in the VC swapper (vc-insets).
+STORYBOARDS = {"scene-canvas": "15.0", "vc-insets": "16.6"}
 
 
 class Probes(unittest.TestCase):
@@ -59,6 +64,22 @@ class Probes(unittest.TestCase):
                                        capture_output=True, text=True, timeout=280)
                     self.assertEqual(p.returncode, 0, p.stderr)
                     self.assertEqual(out.read_bytes(), (GOLDEN / f"{name}.nib").read_bytes())
+
+    def test_storyboards_byte_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, target in STORYBOARDS.items():
+                with self.subTest(probe=name):
+                    flags = [target if f == "17.0" else f for f in FLAGS]
+                    p = subprocess.run([sys.executable, str(IBTOOL), *flags,
+                                        str(SRC / f"{name}.storyboard"),
+                                        "--compilation-directory", tmp],
+                                       capture_output=True, text=True, timeout=280)
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    out, gold = Path(tmp, f"{name}.storyboardc"), GOLDEN / f"{name}.storyboardc"
+                    names = sorted(f.name for f in gold.iterdir())
+                    self.assertEqual(sorted(f.name for f in out.iterdir()), names)
+                    for f in names:
+                        self.assertEqual((out / f).read_bytes(), (gold / f).read_bytes(), f)
 
 
 if __name__ == "__main__":
