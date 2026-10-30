@@ -86,6 +86,8 @@ def _signature(o, objs, memo):
     """Structural identity of an interned object."""
     if o.idx in memo:
         return memo[o.idx]
+    if o.cls == "NSNumber":
+        return ("NSNumber", _number_value(o))
     memo[o.idx] = None  # cycle guard
     parts = [o.cls]
     for k, v in o.values:
@@ -97,20 +99,32 @@ def _signature(o, objs, memo):
     return memo[o.idx]
 
 
+def _number_value(o):
+    (k, v), = o.values
+    return float(v.payload)
+
+
 def finalize_dfs(I, b, root):
-    """Order keys, share equal leaf objects, renumber depth-first from the root."""
+    """Order keys, share equal leaf objects, renumber depth-first from the root.
+    NSNumbers are shared by value, as -isEqual: compares them (@22 == @22.0): the
+    first one encoded stands for the rest (VCAccountInfo: an <integer> 22 after
+    a double 22.0; VCSplash: a <real> 12 after an integer 12)."""
     for o in b.objects:
         _sort_keys(o)
     memo, canon, alias = {}, {}, {}
     for o in b.objects:
-        if o.cls in INTERNED and not getattr(o, "unshared", False):
+        if o.cls in INTERNED and o.cls != "NSNumber" and not getattr(o, "unshared", False):
             sig = _signature(o, b.objects, memo)
             alias[o.idx] = canon.setdefault(sig, o.idx)
     nb = I.Builder()
     made = {}
+    numbers = {}
 
     def visit(o):
         o = b.objects[alias.get(o.idx, o.idx)]
+        if o.cls == "NSNumber":
+            first = numbers.setdefault(_number_value(o), o.idx)
+            o = b.objects[first]
         if o.idx in made:
             return made[o.idx]
         n = nb.new(o.cls)
@@ -1365,9 +1379,6 @@ def runtime_attributes(x, el, target):
             v = x.new("NSNumber")
             if num.tag == "integer":
                 x.put(v, "NS.intval", int_fit(int(num.get("value"))))
-            elif num.tag == "real" and float(num.get("value")).is_integer():
-                # an integral real is stored as an integer (VCSplash: real 12)
-                x.put(v, "NS.intval", int_fit(int(float(num.get("value")))))
             elif num.tag == "real":
                 x.put(v, "NS.dblval", x.b.float64(float(num.get("value"))))
             else:
