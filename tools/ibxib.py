@@ -75,6 +75,8 @@ def _sort_keys(o):
         cls = o.original_class
         tail = SWAP_TAIL
     order = KEY_ORDER.get(cls)
+    if order is None and not o.values:
+        return  # an object without keys (UITapRecognizer)
     if order is None:
         raise Unsupported(f"no key order known for class {cls}")
     pos = {k: i for i, k in enumerate(order)}
@@ -641,8 +643,159 @@ def font(x, el):
 LABEL_ATTRS = VIEW_ATTRS | {
     "text", "textAlignment", "lineBreakMode", "baselineAdjustment", "adjustsFontSizeToFit",
     "minimumFontSize", "minimumScaleFactor", "numberOfLines", "adjustsLetterSpacingToFitWidth",
-    "preferredMaxLayoutWidth", "adjustsFontForContentSizeCategory", "highlighted", "enabled"}
-LABEL_SUBS = VIEW_SUBS | {"fontDescription", "nil"}
+    "preferredMaxLayoutWidth", "adjustsFontForContentSizeCategory", "highlighted", "enabled",
+    "usesAttributedText"}
+LABEL_SUBS = VIEW_SUBS | {"fontDescription", "nil", "attributedString"}
+
+# <paragraphStyle alignment> -> (NSParagraphStyle's AppKit NSAlignment, UIKit NSTextAlignment)
+PARAGRAPH_ALIGNMENTS = {"left": (0, 0), "right": (1, 2), "center": (2, 1),
+                        "justified": (3, 3), "natural": (4, 4)}
+PARAGRAPH_ATTRS = {"key", "alignment", "lineBreakMode", "baseWritingDirection",
+                   "tighteningFactorForTruncation", "allowsDefaultTighteningForTruncation"}
+
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        out.append((n & 0x7F) | (0x80 if n > 0x7F else 0))
+        n >>= 7
+        if not n:
+            return bytes(out)
+
+
+# Named fonts measured, by whether iOS ships them: an installed font archives
+# its scaling keys and descriptor options 1 << 31, a missing one neither
+# (VCTethered, VCJobSettings, VCCapture goldens).
+NAMED_FONTS = {"Helvetica": True, "HelveticaNeue": True, "SFPro-Medium": False}
+# metaFont -> its size when the run gives none (VCCapture, VCJobPhotoStream goldens).
+META_FONT_SIZES = {"system": 13.0, "cellTitle": 12.0, "miniSystem": 9.0}
+
+
+def named_font(x, name, size):
+    b = x.b
+    installed = NAMED_FONTS[name]
+    attrs = x.new("NSDictionary")
+    attrs.add("NSInlinedValue", *YES)
+    num = x.new("NSNumber")
+    x.put(num, "NS.dblval", b.float64(size))
+    for k, v in (("NSFontNameAttribute", x.s(name)), ("NSFontSizeAttribute", num)):
+        attrs.add("UINibEncoderEmptyKey", N.OBJREF, x.s(k).idx)
+        attrs.add("UINibEncoderEmptyKey", N.OBJREF, v.idx)
+    desc = x.new("UIFontDescriptor")
+    x.put(desc, "UIFontDescriptorAttributes", attrs)
+    x.put(desc, "UIFontDescriptorOptions", int_fit(1 << 31 if installed else 0))
+    f = x.new("UIFont")
+    x.put(f, "UIFontName", x.s(name))
+    x.put(f, "UIFontDescriptor", desc)
+    x.put(f, "UIFontPointSize", b.float64(size))
+    if installed:
+        x.put(f, "UIFontTextStyleForScaling", (N.NIL, None))
+        x.put(f, "UIFontPointSizeForScaling", b.float64(0.0))
+        x.put(f, "UIFontMaximumPointSizeAfterScaling", b.float64(0.0))
+    x.put(f, "UIFontTraits", b.int8(0))
+    x.put(f, "UISystemFont", NO)
+    x.put(f, "NSName", x.s(name))
+    x.put(f, "NSSize", b.float64(size))
+    return f
+
+
+def _run_font(x, f):
+    """An attributed run's <font key="NSFont">."""
+    a = f.attrib
+    if a.get("metaFont") in META_FONT_SIZES and set(a) <= {"key", "metaFont", "size"}:
+        return system_font(x, float(a.get("size", META_FONT_SIZES[a["metaFont"]])))
+    if a.get("name") in NAMED_FONTS and set(a) == {"key", "name", "size"}:
+        return named_font(x, a["name"], float(a["size"]))
+    _fail(f, f"attributed font {dict(a)}", x.where)
+
+
+def _run_color(x, c):
+    """An attributed run's color; the System catalog's textColor is opaque
+    black (VCCapture golden)."""
+    if c.get("colorSpace") == "catalog":
+        if c.get("catalog") != "System" or c.get("name") != "textColor":
+            _fail(c, f"catalog color {dict(c.attrib)}", x.where)
+        return _rgb_components(x, x.new("UIColor"), [0.0, 0.0, 0.0, 1.0])
+    return color(x, c)
+
+
+def attributed_text(x, el, label_obj):
+    """<attributedString key="attributedText"> on a label -> (text, first font,
+    first color, UIKit alignment, NSMutableAttributedString). One dictionary
+    per run, keys sorted, in NSAttributes; NSAttributeInfo holds (UTF-16
+    length, dictionary index) varint pairs. The label's line break mode
+    replaces the runs' own (VCJobPhotoStream golden)."""
+    b = x.b
+    at = el.find("attributedString[@key='attributedText']")
+    if at is None or set(at.attrib) != {"key"}:
+        _fail(el, "attributed label without attributedText", x.where)
+    lbm = x.I.LINE_BREAK_MODES[el.get("lineBreakMode", "tailTruncation")]
+    shadow = x.new("NSShadow")
+    x.put(shadow, "NSShadowVert", b.float64(1.0))
+    x.put(shadow, "NSShadowColor", (N.NIL, None))
+    styles, dicts, seen, info, text = {}, [], {}, b"", ""
+    first = None
+    for frag in at:
+        if frag.tag != "fragment" or set(frag.attrib) != {"content"} or len(frag) != 1 \
+                or frag[0].tag != "attributes":
+            _fail(at, "attributed string shape", x.where)
+        entries = {}
+        for a in frag[0]:
+            k = a.get("key")
+            if a.tag == "color" and k in ("NSColor", "NSBackgroundColor"):
+                entries[k] = _run_color(x, a)
+            elif a.tag == "font" and k == "NSFont":
+                entries[k] = _run_font(x, a)
+            elif a.tag == "paragraphStyle" and k == "NSParagraphStyle":
+                # allowsDefaultTighteningForTruncation="NO" stores nothing (VCTethered golden).
+                if set(a.attrib) - PARAGRAPH_ATTRS or a.get("baseWritingDirection") != "natural" \
+                        or a.get("allowsDefaultTighteningForTruncation", "NO") != "NO" \
+                        or float(a.get("tighteningFactorForTruncation", "0")) != 0.0 \
+                        or a.get("alignment") not in PARAGRAPH_ALIGNMENTS:
+                    _fail(a, f"paragraph style {dict(a.attrib)}", x.where)
+                align = a.get("alignment")
+                if align not in styles:
+                    p = x.new("NSMutableParagraphStyle")
+                    if PARAGRAPH_ALIGNMENTS[align][0]:
+                        x.put(p, "NSAlignment", b.int8(PARAGRAPH_ALIGNMENTS[align][0]))
+                    if lbm:
+                        x.put(p, "NSLineBreakMode", b.int8(lbm))
+                    x.put(p, "NSTabStops", (N.NIL, None))
+                    x.put(p, "NSLineBreakStrategy", int_fit(65535))
+                    styles[align] = p
+                entries[k] = styles[align]
+            else:
+                _fail(a, f"attribute <{a.tag} key={k}>", x.where)
+        if "NSColor" not in entries or "NSFont" not in entries or "NSParagraphStyle" not in entries:
+            _fail(frag, "run without color, font or paragraph style", x.where)
+        entries["NSShadow"] = shadow
+        if first is None:
+            first = (entries["NSFont"], entries["NSColor"],
+                     PARAGRAPH_ALIGNMENTS[frag[0].find("paragraphStyle").get("alignment")][1])
+        # Runs with equal attributes share one dictionary (VCTermsModal golden).
+        sig = tuple(sorted((a.tag, tuple(sorted(a.attrib.items()))) for a in frag[0]))
+        if sig not in seen:
+            d = x.new("NSDictionary")
+            d.add("NSInlinedValue", *YES)
+            for k in sorted(entries):
+                d.add("UINibEncoderEmptyKey", N.OBJREF, x.s(k).idx)
+                d.add("UINibEncoderEmptyKey", N.OBJREF, entries[k].idx)
+            seen[sig] = len(dicts)
+            dicts.append(d)
+        content = frag.get("content")
+        info += _varint(len(content.encode("utf-16-le")) // 2) + _varint(seen[sig])
+        text += content
+    if first is None:
+        _fail(at, "empty attributed string", x.where)
+    s = x.new("NSMutableAttributedString")
+    ms = x.new("NSMutableString")
+    ms.add("NS.bytes", N.DATA, text.encode("utf-8"))
+    x.put(s, "NSString", ms)
+    x.put(s, "NSAttributes", x.array(dicts, "NSMutableArray"))
+    data = x.new("NSMutableData")
+    data.add("NS.bytes", N.DATA, info)
+    x.put(s, "NSAttributeInfo", data)
+    return (text, *first, s)
 
 
 def label(x, el):
@@ -650,18 +803,28 @@ def label(x, el):
     b = x.b
     o = new_view_obj(x, el, "UILabel")
     view_keys(x, el, o, top=el in x.tops)
-    if el.get("text") is None:
-        _fail(el, "label without text (attributed?)", x.where)
-    x.put(o, "UIText", x.s(el.get("text")))
+    attributed = _bool(el, "usesAttributedText")
     fd = el.find("fontDescription")
-    x.put(o, "UIFont", font(x, fd))
-    tc = keyed_color(x, el, "textColor")
-    if tc is None:
-        tc = x.I.build_color(b, "labelColor", x.where)
+    if attributed:
+        if el.get("text") is not None or fd is not None or el.find("color[@key='textColor']") is not None:
+            _fail(el, "attributed label with plain text attributes", x.where)
+        text, run_font, tc, align, astr = attributed_text(x, el, o)
+        x.put(o, "UIText", x.s(text))
+        x.put(o, "UIFont", run_font)
+        x.put(o, "UITextAlignment", b.int8(align))
+        x.put(o, "UIAttributedText", astr)
+    else:
+        if el.get("text") is None:
+            _fail(el, "label without text", x.where)
+        x.put(o, "UIText", x.s(el.get("text")))
+        x.put(o, "UIFont", font(x, fd))
+        tc = keyed_color(x, el, "textColor")
+        if tc is None:
+            tc = x.I.build_color(b, "labelColor", x.where)
+        ta = el.get("textAlignment", "left")
+        x.put(o, "UITextAlignment", b.int8(x.I.TEXT_ALIGNMENTS[ta]))
     x.put(o, "UITextColor", tc)
     x.put(o, "UIShadowOffset", b.geom(0.0, -1.0))
-    ta = el.get("textAlignment", "left")
-    x.put(o, "UITextAlignment", b.int8(x.I.TEXT_ALIGNMENTS[ta]))
     if el.get("adjustsFontSizeToFit") != "NO":
         x.put(o, "UIAdjustsFontSizeToFit", YES)
     ps = fd.get("pointSize") if fd is not None else None
@@ -694,7 +857,7 @@ def label(x, el):
     if el.get("preferredMaxLayoutWidth") is not None:
         x.put(o, "UIPreferredMaxLayoutWidth", b.float32(float(el.get("preferredMaxLayoutWidth"))))
     x.put(o, "UIDisableUpdateTextColorOnTraitCollectionChange",
-          NO if el.find("nil[@key='textColor']") is not None else YES)
+          NO if attributed or el.find("nil[@key='textColor']") is not None else YES)
     finish_swap(x, o)
     return o
 
@@ -1338,6 +1501,21 @@ def visual_effect_view(x, el):
     return o
 
 
+def tap_gesture_recognizer(x, el):
+    """<tapGestureRecognizer>, default settings; its _imp is an empty
+    UITapRecognizer (VCCapture golden)."""
+    check(x, el, {"id"}, {"connections"})
+    o = x.new("UITapGestureRecognizer")
+    o.swap = None
+    x.ids[el.get("id")] = o
+    x.put(o, "UIGestureRecognizer.allowedTouchTypes", x.b.int8(15))
+    x.put(o, "UIGestureRecognizer.requiresExclusiveTouchType", YES)
+    x.put(o, "UITapGestureRecognizer._imp", x.new("UITapRecognizer"))
+    if el.find("connections") is not None:
+        x.connections.append((o, el.find("connections")))
+    return o
+
+
 COLLECTION_ATTRS = SCROLL_ATTRS | {"dataMode"}
 FLOW_LAYOUT_ATTRS = {"key", "id", "minimumLineSpacing", "minimumInteritemSpacing"}
 # Interface Builder's defaults; Apple stores a flow layout's value only when it
@@ -1445,7 +1623,7 @@ def table_view(x, el):
 BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
             "tableView": table_view, "stackView": stack_view,
             "visualEffectView": visual_effect_view, "textView": text_view,
-            "collectionView": collection_view,
+            "collectionView": collection_view, "tapGestureRecognizer": tap_gesture_recognizer,
             "segmentedControl": segmented_control, "tableViewCell": table_view_cell,
             "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
@@ -1664,12 +1842,13 @@ def _guide_placeholder(x, cls):
     return g
 
 
-def _rest(x, o):
-    """Everything under a top-level object, breadth first: as each view is
-    reached, its guide placeholders (keyboard first), constraints and subviews
-    (VCPickSubjectsGroup golden)."""
+def _rest(x, tops):
+    """Everything under the top-level objects, one breadth-first walk over all
+    of them: as each view is reached, its guide placeholders (keyboard first),
+    constraints and subviews (VCPickSubjectsGroup golden; VCCapture: the view,
+    its tap recognizer, then the view's subviews)."""
     out = []
-    queue = [o]
+    queue = list(tops)
     while queue:
         st = x.subtree.get(queue.pop(0).idx)
         if st is None:
@@ -1701,12 +1880,17 @@ def connections_pass(x, proxies):
             elif c.tag == "outletCollection":
                 # One connection per property; its destinations, in document
                 # order, in an array of the collection class (PhotoDay goldens).
-                cls = c.get("collectionClass")
+                # appends="YES" (a view's gestureRecognizers) adds to the existing
+                # collection: an NSArray, its destinations in an NSMutableArray
+                # (VCCapture golden).
+                appends = c.get("appends") == "YES"
+                cls = "NSArray" if appends and c.get("collectionClass") is None else c.get("collectionClass")
                 if cls is None:
                     _fail(c, "outlet collection without collectionClass", x.where)
                 k = (src.idx, c.get("property"))
                 if k not in collections:
-                    collections[k] = ("UIRuntimeOutletCollectionConnection", c.get("property"), src, [], cls)
+                    collections[k] = ("UIRuntimeOutletCollectionConnection", c.get("property"), src, [],
+                                      cls, appends)
                     outlets.append(collections[k])
                 collections[k][3].append(x.ids[dst])
             elif c.tag == "action":
@@ -1727,9 +1911,10 @@ def connections_pass(x, proxies):
         x.put(o, "UILabel", x.s(label))
         x.put(o, "UISource", src)
         if coll:
-            x.put(o, "UIDestination", x.array(dst, coll[0]))
-            x.put(o, "runtimeCollectionClassName", x.s(coll[0]))
-            x.put(o, "addsContentToExistingCollection", NO)
+            cls, appends = coll
+            x.put(o, "UIDestination", x.array(dst, "NSMutableArray" if appends else cls))
+            x.put(o, "runtimeCollectionClassName", x.s(cls))
+            x.put(o, "addsContentToExistingCollection", YES if appends else NO)
         else:
             x.put(o, "UIDestination", dst)
         out.append(o)
@@ -1843,9 +2028,7 @@ def compile_xib(path, I):
     tops = [build(x, el) for el in x.tops]
     constraints_pass(x)
     conns = connections_pass(x, proxies)
-    listed = list(proxies)
-    for t in tops:
-        listed += [t] + _rest(x, t)
+    listed = list(proxies) + tops + _rest(x, tops)
     pairs = pairs_pass(x, listed)
     empty = x.array([])
     x.put(root, "UINibTopLevelObjectsKey", x.array(proxies + tops))
