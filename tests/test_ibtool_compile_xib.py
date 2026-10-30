@@ -109,20 +109,13 @@ class CompileXibRefusals(unittest.TestCase):
         self.check(XIB.format(runtime="iOS.CocoaTouch", objects=ph),
                    "unsupported placeholder 'IBToolBar' (t.xib object #2)")
 
-    def test_multiple_top_level_objects(self):
-        objects = PLACEHOLDERS \
-            + VIEW.format(dst="-1", etype_attr=' eventType="touchUpInside"', extra="") \
-            + VIEW.format(dst="-1", etype_attr=' eventType="touchUpInside"', extra="")
-        self.check(XIB.format(runtime="iOS.CocoaTouch", objects=objects),
-                   "t.xib: multiple top-level objects are not supported")
-
     def test_unsupported_element(self):
         objects = PLACEHOLDERS + """
-        <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" id="b1">
+        <datePicker contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" id="b1">
             <rect key="frame" x="0.0" y="0.0" width="100" height="31"/>
-        </button>"""
+        </datePicker>"""
         self.check(XIB.format(runtime="iOS.CocoaTouch", objects=objects),
-                   "unsupported element <button> (t.xib object #2)")
+                   "unsupported element <datePicker> (t.xib object #2)")
 
     def test_no_top_level_object(self):
         self.check(XIB.format(runtime="iOS.CocoaTouch", objects=PLACEHOLDERS),

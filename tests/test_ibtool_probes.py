@@ -23,6 +23,10 @@ FLAGS = ["--target-device", "iphone", "--target-device", "ipad",
 BYTE_IDENTICAL = [
     "attr-top",
     "attr-trailing",
+    # Plain button configurations: the background is the tint at alpha 0.18
+    # (unshared), clearColor without a tint; custom-type buttons have no
+    # UIButtonType (tools/ibxib.py).
+    "button-config",
     "nosymbolic",
     # File's Owner customClass/customModule leave the nib unchanged (its golden
     # equals swap.nib's).

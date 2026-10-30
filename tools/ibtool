@@ -1330,6 +1330,13 @@ def compile_xib(path):
         import ibmac
         ibmac.set_target_module(TARGET_MODULE)
         return ibmac.compile_xib(path)
+    # tools/ibxib.py is the general UIKit compiler; this file's own builders
+    # remain for what it does not cover yet.
+    import ibxib
+    try:
+        return ibxib.compile_xib(path, sys.modules[__name__])
+    except ibxib.Unsupported:
+        pass
     objects = _compile_xib_objects_element(doc, path)
     resources, named = _parse_color_resources(doc, path)
 

@@ -102,7 +102,7 @@ def finalize_dfs(I, b, root):
         _sort_keys(o)
     memo, canon, alias = {}, {}, {}
     for o in b.objects:
-        if o.cls in INTERNED:
+        if o.cls in INTERNED and not getattr(o, "unshared", False):
             sig = _signature(o, b.objects, memo)
             alias[o.idx] = canon.setdefault(sig, o.idx)
     nb = I.Builder()
@@ -437,7 +437,9 @@ def view_keys(x, el, o, top, default_mask=36, opaque=True):
     if _bool(el, "multipleTouchEnabled"):
         x.put(o, "UIMultipleTouchEnabled", YES)
     x.put(o, "UIAutoresizeSubviews", YES)
-    mask = _mask(x, el, 18 if top else default_mask)
+    # A top-level <view> defaults to flexible width and height; any other
+    # top-level element keeps the subview default (TinyLabel golden).
+    mask = _mask(x, el, 18 if top and el.tag == "view" else default_mask)
     if mask:
         x.put(o, "UIAutoresizingMask", b.int8(mask))
     if _bool(el, "clipsSubviews"):
@@ -715,14 +717,111 @@ BUTTON_TYPES = {"system": 1, "detailDisclosure": 2, "infoLight": 3, "infoDark": 
                 "contactAdd": 5, "roundedRect": 1, "close": 7}
 
 
+def _tint_background(x, el):
+    """A plain configuration's background: the button's tint at alpha 0.18,
+    clearColor without one (probe buttoncfg)."""
+    t = el.find("color[@key='tintColor']")
+    if t is None:
+        return x.I.build_clear_color(x.b, x.where)
+    c = x.new("UIColor")
+    c.unshared = True  # one per configuration, equal or not (VCSort golden)
+    a = t.attrib
+    space = a.get("customColorSpace") if a.get("colorSpace") == "custom" else a.get("colorSpace")
+    if "systemColor" in a:
+        spec = x.I.SYSTEM_COLORS.get(a["systemColor"]) or x.resources.get(a["systemColor"])
+        if spec is None:
+            _fail(t, f"tint {a['systemColor']}", x.where)
+        if spec[0] == "white":
+            return _white_components(x, c, spec[1], 0.18)
+        return _rgb_components(x, c, list(spec[1:4]) + [0.18])
+    if "white" in a and space == "genericGamma22GrayColorSpace":
+        return _white_components(x, c, float(a["white"]), 0.18)
+    if "red" in a and space == "sRGB":
+        return _rgb_components(x, c, [float(a[k]) for k in ("red", "green", "blue")] + [0.18])
+    _fail(t, "tint color form under a buttonConfiguration", x.where)
+
+
+def _background_configuration(x, el):
+    bg = x.new("UIBackgroundConfiguration")
+    b = x.b
+    clear = x.I.build_clear_color(b, x.where)
+    for k, v in (("customView", (N.NIL, None)), ("hasCustomized-customView", NO),
+                 ("cornerRadius", b.float64(17.0)), ("hasCustomized-cornerRadius", NO),
+                 ("maskedCorners", b.int8(15)), ("hasCustomized-maskedCorners", NO),
+                 ("backgroundColor", _tint_background(x, el)), ("hasCustomized-backgroundColor", NO),
+                 ("backgroundColorTransformerIdentifier", b.int8(0)),
+                 ("hasCustomized-backgroundColorTransformerIdentifier", NO),
+                 ("visualEffect", (N.NIL, None)), ("hasCustomized-visualEffect", NO),
+                 ("visualEffectGroupName", (N.NIL, None)), ("hasCustomized-visualEffectGroupName", NO),
+                 ("visualEffectblurClippingMode", b.int8(0)),
+                 ("image", (N.NIL, None)), ("hasCustomized-image", NO),
+                 ("imageContentMode", b.int8(0)), ("hasCustomized-imageContentMode", NO),
+                 ("backgroundInsets", x.s("{0, 0, 0, 0}")), ("hasCustomized-backgroundInsets", NO),
+                 ("edgesAddingLayoutMarginsToBackgroundInsets", b.int8(0)),
+                 ("hasCustomized-edgesAddingLayoutMarginsToBackgroundInsets", NO),
+                 ("strokeColor", clear), ("hasCustomized-strokeColor", YES),
+                 ("strokeColorTransformerIdentifier", b.int8(0)),
+                 ("hasCustomized-strokeColorTransformerIdentifier", NO),
+                 ("strokeWidth", b.float64(1.0)), ("hasCustomized-strokeWidth", YES),
+                 ("strokeOutset", b.float64(0.0)), ("hasCustomized-strokeOutset", NO),
+                 ("strokeLocation", b.int8(0)), ("defaultStyle", b.int8(0)),
+                 ("defaultStyle_v2", b.int8(0))):
+        x.put(bg, k, v)
+    return bg
+
+
+def button_configuration(x, el, cfg_el):
+    """<buttonConfiguration style="plain"> -> UIButtonConfiguration (PhotoDay
+    goldens, probe buttoncfg)."""
+    if set(cfg_el.attrib) != {"key", "style"} or cfg_el.get("style") != "plain":
+        _fail(cfg_el, "buttonConfiguration shape", x.where)
+    b = x.b
+    cfg = x.new("UIButtonConfiguration")
+    for k, v in (("UIButtonConfigurationButtonStyle", b.int8(0)),
+                 ("UIButtonConfigurationBackground", _background_configuration(x, el)),
+                 ("UIButtonConfigurationCornerStyle", b.int8(0)),
+                 ("UIButtonConfigurationButtonSize", b.int8(0)),
+                 ("UIButtonConfigurationMacIdiomStyle", b.int8(0))):
+        x.put(cfg, k, v)
+    for k in ("BaseBackgroundColor", "BaseForegroundColor", "Image",
+              "PreferredSymbolConfigurationForImage", "SymbolContentTransition"):
+        x.put(cfg, "UIButtonConfiguration" + k, (N.NIL, None))
+    x.put(cfg, "UIButtonConfigurationShowsActivityIndicator", NO)
+    for k in ("Title", "Subtitle"):
+        t = x.new("NSAttributedString")
+        x.put(t, "NSString", x.s(""))
+        x.put(cfg, "UIButtonConfiguration" + k, t)
+    for ch in cfg_el:
+        if ch.tag != "directionalEdgeInsets" or ch.get("key") != "contentInsets":
+            _fail(ch, "buttonConfiguration child", x.where)
+        ins = "{" + ", ".join(f"{float(ch.get(k, '0')):g}" for k in ("top", "leading", "bottom", "trailing")) + "}"
+        x.put(cfg, "UIButtonConfigurationContentInset", x.s(ins))
+    x.put(cfg, "UIButtonConfigurationImagePlacement", b.int8(2))
+    x.put(cfg, "UIButtonConfigurationImagePadding", b.float32(0.0))
+    x.put(cfg, "UIButtonConfigurationTitlePadding", b.float32(1.0))
+    x.put(cfg, "UIButtonConfigurationTitleAlignment", b.int8(0))
+    return cfg
+
+
 def button(x, el):
     check(x, el, BUTTON_ATTRS, BUTTON_SUBS)
     b = x.b
-    if el.find("buttonConfiguration") is not None:
-        _fail(el, "buttonConfiguration", x.where)
     o = new_view_obj(x, el, "UIButton")
     view_keys(x, el, o, top=el in x.tops)
     control_keys(x, el, o)
+    cfg_el = el.find("buttonConfiguration[@key='configuration']")
+    if cfg_el is not None:
+        # A configured button keeps only the configuration: no stateful
+        # content, font or insets (the document's <state> title is dropped).
+        if el.findall("inset") or el.find("fontDescription") is not None:
+            _fail(el, "configured button with insets or font", x.where)
+        x.put(o, "UIAdjustsImageWhenHighlighted", YES)
+        x.put(o, "UIAdjustsImageWhenDisabled", YES)
+        if el.get("buttonType") is not None:
+            x.put(o, "UIButtonType", b.int8(BUTTON_TYPES[el.get("buttonType")]))
+        x.put(o, "UIButtonConfiguration", button_configuration(x, el, cfg_el))
+        finish_swap(x, o)
+        return o
     states = el.findall("state")
     if states:
         d = x.new("NSMutableDictionary")
@@ -1009,7 +1108,8 @@ def _constraint(x, c, owner_el, owner):
 def _guides(x, el, o):
     """Layout guides a view declares: the safe area (archived in
     UIViewLayoutGuides, with its system constraints) and the keyboard guide
-    (archived only where a constraint uses it)."""
+    (archived only where a constraint uses it). Every guide gets a placeholder
+    in the objects list, used or not."""
     st = x.subtree[o.idx]
     for g in el:
         if g.tag == "viewLayoutGuide" and g.get("key") == "safeArea":
@@ -1020,6 +1120,10 @@ def _guides(x, el, o):
                 pass
             x.ids[g.get("id")] = guide
             st["guides"].append(("UILayoutGuide", guide))
+            # UIViewLayoutGuides only when a constraint uses the guide
+            # (PhotoDay goldens: 32 used, 11 unused).
+            if g.get("id") in x.constraint_items:
+                st["archived_guides"] = [guide]
         elif g.tag == "keyboardLayoutGuide" and g.get("key") == "keyboard":
             k = x.new("UIKeyboardLayoutGuide")
             x.put(k, "UILayoutGuideOwningView", o)
@@ -1084,12 +1188,14 @@ def constraint_order(I, view_el, cons):
 
 def constraints_pass(x):
     """After every view exists: guides, then each view's constraints in Apple's order."""
+    x.constraint_items = {i for c in x.doc.iter("constraint")
+                          for i in (c.get("firstItem"), c.get("secondItem")) if i}
     for idx, st in list(x.subtree.items()):
         _guides(x, st["el"], x.b.objects[idx])
     for idx, st in x.subtree.items():
         o = x.b.objects[idx]
         el = st["el"]
-        safe = [g for c, g in st["guides"] if c == "UILayoutGuide"]
+        safe = st.get("archived_guides")
         if safe:
             x.put(o, "UIViewLayoutGuides", x.array(safe, "NSMutableArray"))
         cel = el.find("constraints")
@@ -1110,7 +1216,7 @@ def constraints_pass(x):
     for idx, st in x.subtree.items():
         el = st["el"]
         if (el.get("translatesAutoresizingMaskIntoConstraints") == "NO"
-                and el.get("id") in referenced):
+                and (el.get("id") in referenced or el in x.tops)):
             x.put(x.b.objects[idx], "UIViewDoesNotTranslateAutoresizingMaskIntoConstraints", YES)
 
 
@@ -1266,6 +1372,8 @@ def compile_xib(path, I):
     root = x.new("NSObject")
     proxies = []
     x.tops = [el for el in objects if el.tag != "placeholder"]
+    if not x.tops:
+        raise Unsupported("no top-level object")
     for el in objects:
         if el.tag != "placeholder":
             continue
@@ -1273,6 +1381,8 @@ def compile_xib(path, I):
                                   "customModule", "customModuleProvider"}
         if extra or any(ch.tag != "connections" for ch in el):
             _fail(el, "placeholder shape", x.where)
+        if el.get("placeholderIdentifier") not in ("IBFilesOwner", "IBFirstResponder"):
+            _fail(el, f"placeholder {el.get('placeholderIdentifier')}", x.where)
         p = x.new("UIProxyObject")
         x.put(p, "UIProxiedObjectIdentifier", x.s(el.get("placeholderIdentifier")))
         x.ids[el.get("id")] = p
