@@ -141,7 +141,7 @@ class X:
         self.ids = {}         # xib id -> Obj
         self.els = {}         # xib id -> element
         self.connections = []  # (kind, source obj, element)
-        self.pairs = []       # (element, target obj)
+        self.pairs = []       # (owner element, target obj, None for runtime attributes | (key path, rect))
         self.subtree = {}     # obj idx -> (guide placeholders, constraints, kids)
 
     def new(self, cls, orig=None):
@@ -411,7 +411,7 @@ def check(x, el, attrs, subs):
             _fail(el, f"unsupported color key {ch.get('key')}", x.where)
 
 
-def view_keys(x, el, o, top, default_mask=36):
+def view_keys(x, el, o, top, default_mask=36, opaque=True):
     """The UIView part of any view: geometry, flags, colors, subviews,
     constraints, layout guides. Records the view's subtree for UINibObjectsKey."""
     b = x.b
@@ -428,7 +428,7 @@ def view_keys(x, el, o, top, default_mask=36):
     if bg is not None:
         x.put(o, "UIBackgroundColor", bg)
     x.put(o, "UIDeepDrawRect", YES)
-    if el.get("opaque") != "NO":
+    if opaque and el.get("opaque") != "NO":
         x.put(o, "UIOpaque", YES)
     if _bool(el, "hidden"):
         x.put(o, "UIHidden", YES)
@@ -469,7 +469,7 @@ def view_keys(x, el, o, top, default_mask=36):
     x.put(o, "UIViewLargeContentStoredProperties", (N.NIL, None))
     x.subtree[o.idx] = {"el": el, "kids": kids, "cons": [], "guides": []}
     if el.find("userDefinedRuntimeAttributes") is not None:
-        x.pairs.append((el, o))
+        x.pairs.append((el, o, None))
     conns = el.find("connections")
     if conns is not None:
         x.connections.append((o, conns))
@@ -671,11 +671,12 @@ def image_view(x, el):
     if el.get("highlightedImage") or el.get("adjustsImageSizeForAccessibilityContentSizeCategory"):
         _fail(el, "imageView attributes", x.where)
     o = new_view_obj(x, el, "UIImageView")
-    view_keys(x, el, o, top=el in x.tops)
+    p = el.find("preferredSymbolConfiguration[@key='preferredSymbolConfiguration']")
+    # An image view with a symbol configuration is never opaque (8/8 goldens).
+    view_keys(x, el, o, top=el in x.tops, opaque=p is None)
     img = image_ref(x, el, "image")
     if img is not None:
         x.put(o, "UIImage", img)
-    p = el.find("preferredSymbolConfiguration[@key='preferredSymbolConfiguration']")
     if p is not None:
         x.put(o, "UIPreferredSymbolConfiguration", symbol_configuration(x, p))
     finish_swap(x, o)
@@ -900,7 +901,7 @@ def switch(x, el):
     # UISwitch resets its frame to its intrinsic size when decoded, so Apple
     # restores the document frame with a key-value pair.
     fx, fy, w, h = _frame(x, el)
-    x.pairs.append((("frame", f"{{{{{fx:g}, {fy:g}}}, {{{w:g}, {h:g}}}}}"), o))
+    x.pairs.append((el, o, ("frame", f"{{{{{fx:g}, {fy:g}}}, {{{w:g}, {h:g}}}}}")))
     finish_swap(x, o)
     return o
 
@@ -1188,19 +1189,34 @@ def connections_pass(x, proxies):
     return out
 
 
-def pairs_pass(x):
-    out = []
-    for el, target in x.pairs:
-        if isinstance(el, tuple):
-            key_path, rect = el
+# Apple's order of key-value-pair owners is not derivable from the document: it
+# disagrees with tree order, id order and archive order, sometimes within one
+# file. Owners in UINibObjectsKey order is the closest rule (36 of 54 goldens).
+# Within an owner, pairs follow document order. PAIR_OWNER_ORDER (xib ids), when
+# set, overrides the owner order, to compare against a golden modulo it.
+PAIR_OWNER_ORDER = None
+
+
+def pairs_pass(x, listed):
+    groups = {}
+    for el, target, spec in x.pairs:
+        out = groups.setdefault(target.idx, (el, target, []))[2]
+        if spec is not None:
+            key_path, rect = spec
             p = x.new("UINibKeyValuePair")
             x.put(p, "UIObject", target)
             x.put(p, "UIValue", x.b.nsvalue_rect(rect))
             x.put(p, "UIKeyPath", x.s(key_path))
             out.append(p)
-            continue
-        out += runtime_attributes(x, el, target)
-    return out
+        else:
+            out += runtime_attributes(x, el, target)
+    pos = {o.idx: n for n, o in enumerate(listed)}
+    if PAIR_OWNER_ORDER is not None:
+        rank = {i: n for n, i in enumerate(PAIR_OWNER_ORDER)}
+        key = lambda g: rank.get(g[0].get("id"), len(rank))  # noqa: E731
+    else:
+        key = lambda g: pos.get(g[1].idx, len(pos))  # noqa: E731
+    return [p for g in sorted(groups.values(), key=key) for p in g[2]]
 
 
 def runtime_attributes(x, el, target):
@@ -1266,10 +1282,10 @@ def compile_xib(path, I):
     tops = [build(x, el) for el in x.tops]
     constraints_pass(x)
     conns = connections_pass(x, proxies)
-    pairs = pairs_pass(x)
     listed = list(proxies)
     for t in tops:
         listed += [t] + _rest(x, t)
+    pairs = pairs_pass(x, listed)
     empty = x.array([])
     x.put(root, "UINibTopLevelObjectsKey", x.array(proxies + tops))
     x.put(root, "UINibObjectsKey", x.array(listed))
