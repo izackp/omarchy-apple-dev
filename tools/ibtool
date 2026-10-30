@@ -500,7 +500,11 @@ ALLOWED_ATTRS = {
               "userLabel",
               # React Native's template LaunchScreen labels
               "clipsSubviews", "minimumFontSize"},
-    "placeholder": {"placeholderIdentifier", "id", "userLabel", "customClass"},
+    # A placeholder compiles to a UIProxyObject that names only its identifier: Apple's
+    # nib is byte-identical with or without File's Owner customClass/customModule
+    # (probe: owner-module.xib).
+    "placeholder": {"placeholderIdentifier", "id", "userLabel", "customClass",
+                    "customModule", "customModuleProvider"},
     "tableViewCell": {"clipsSubviews", "contentMode",
                       "preservesSuperviewLayoutMargins", "selectionStyle",
                       "accessoryType", "indentationWidth", "reuseIdentifier",
