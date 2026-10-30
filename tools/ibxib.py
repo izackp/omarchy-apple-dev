@@ -1257,6 +1257,7 @@ EVENT_MASKS = {"touchUpInside": 64, "valueChanged": 4096, "editingChanged": 1310
 
 def connections_pass(x, proxies):
     outlets, events = [], []
+    collections = {}  # (source idx, property) -> outlets entry
     for src, conns in x.connections:
         for c in conns:
             dst = c.get("destination")
@@ -1265,7 +1266,16 @@ def connections_pass(x, proxies):
             if c.tag == "outlet":
                 outlets.append(("UIRuntimeOutletConnection", c.get("property"), src, x.ids[dst]))
             elif c.tag == "outletCollection":
-                _fail(c, "outlet collection", x.where)
+                # One connection per property; its destinations, in document
+                # order, in an array of the collection class (PhotoDay goldens).
+                cls = c.get("collectionClass")
+                if cls is None:
+                    _fail(c, "outlet collection without collectionClass", x.where)
+                k = (src.idx, c.get("property"))
+                if k not in collections:
+                    collections[k] = ("UIRuntimeOutletCollectionConnection", c.get("property"), src, [], cls)
+                    outlets.append(collections[k])
+                collections[k][3].append(x.ids[dst])
             elif c.tag == "action":
                 ev = c.get("eventType")
                 if ev is not None and ev not in EVENT_MASKS:
@@ -1275,14 +1285,20 @@ def connections_pass(x, proxies):
                 _fail(c, "connection kind", x.where)
     # Apple sorts outlets by property name, then actions by event mask (none
     # first) and selector.
-    outlets.sort(key=lambda t: t[1])
+    # Outlet collections come first (VCSortList golden).
+    outlets.sort(key=lambda t: (len(t) == 4, t[1]))
     events.sort(key=lambda t: (EVENT_MASKS.get(t[3], 0), t[0]))
     out = []
-    for cls, label, src, dst in outlets:
+    for cls, label, src, dst, *coll in outlets:
         o = x.new(cls)
         x.put(o, "UILabel", x.s(label))
         x.put(o, "UISource", src)
-        x.put(o, "UIDestination", dst)
+        if coll:
+            x.put(o, "UIDestination", x.array(dst, coll[0]))
+            x.put(o, "runtimeCollectionClassName", x.s(coll[0]))
+            x.put(o, "addsContentToExistingCollection", NO)
+        else:
+            x.put(o, "UIDestination", dst)
         out.append(o)
     for sel, src, dst, ev in events:
         o = x.new("UIRuntimeEventConnection")
