@@ -41,10 +41,13 @@ BYTE_IDENTICAL = [
     # (compiled with --minimum-deployment-target 16.9, see DEPLOYMENT).
     "resize-device",
     "swap",
+    # A xib declaring a deployment below iOS 14.0 with a system image compiles
+    # to a nib bundle: objects-14.0+.nib and runtime.nib (tools/ibtool).
+    "system-image-bundle",
     "tools-new",
 ]
 # Probes compiled for another deployment target than FLAGS' 17.0.
-DEPLOYMENT = {"resize-device": "16.9"}
+DEPLOYMENT = {"resize-device": "16.9", "system-image-bundle": "15.0"}
 # Storyboard probes, compiled into a --compilation-directory at their deployment
 # target: below iOS 17.0 a scene without a <device> lays its framed root view out
 # at 600x600 (scene-canvas); a storyboard imageView is opaque, and
@@ -63,7 +66,7 @@ class Probes(unittest.TestCase):
                                         str(out), str(SRC / f"{name}.xib")],
                                        capture_output=True, text=True, timeout=280)
                     self.assertEqual(p.returncode, 0, p.stderr)
-                    self.assertEqual(out.read_bytes(), (GOLDEN / f"{name}.nib").read_bytes())
+                    self.assertTreeEqual(out, GOLDEN / f"{name}.nib")
 
     def test_storyboards_byte_identical(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,11 +78,19 @@ class Probes(unittest.TestCase):
                                         "--compilation-directory", tmp],
                                        capture_output=True, text=True, timeout=280)
                     self.assertEqual(p.returncode, 0, p.stderr)
-                    out, gold = Path(tmp, f"{name}.storyboardc"), GOLDEN / f"{name}.storyboardc"
-                    names = sorted(f.name for f in gold.iterdir())
-                    self.assertEqual(sorted(f.name for f in out.iterdir()), names)
-                    for f in names:
-                        self.assertEqual((out / f).read_bytes(), (gold / f).read_bytes(), f)
+                    self.assertTreeEqual(Path(tmp, f"{name}.storyboardc"),
+                                         GOLDEN / f"{name}.storyboardc")
+
+    def assertTreeEqual(self, out, gold):
+        """A file byte for byte, or a directory's files by name and bytes."""
+        self.assertEqual(out.is_dir(), gold.is_dir(), out)
+        if not gold.is_dir():
+            self.assertEqual(out.read_bytes(), gold.read_bytes())
+            return
+        names = sorted(f.name for f in gold.iterdir())
+        self.assertEqual(sorted(f.name for f in out.iterdir()), names)
+        for f in names:
+            self.assertEqual((out / f).read_bytes(), (gold / f).read_bytes(), f)
 
 
 if __name__ == "__main__":

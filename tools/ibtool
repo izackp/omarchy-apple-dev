@@ -17,6 +17,7 @@ down for us: it is the iteration order of an __NSSetM of the keys (keyorder.py).
 import math
 import os
 import plistlib
+import shutil
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -5369,10 +5370,37 @@ def _main_compile(action_args, argv):
         return 1
     _main_partial_plist(argv)
     tmp = out + ".tmp-nibarchive"
-    with open(tmp, "wb") as f:
-        f.write(data)
+    if _nib_bundle(xib):
+        if os.path.isdir(tmp):
+            shutil.rmtree(tmp)
+        os.mkdir(tmp)
+        for name in ("objects-14.0+.nib", "runtime.nib"):
+            with open(os.path.join(tmp, name), "wb") as f:
+                f.write(data)
+        if os.path.isdir(out):
+            shutil.rmtree(out)
+        elif os.path.exists(out):
+            os.remove(out)
+    else:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        if os.path.isdir(out):
+            shutil.rmtree(out)
     os.replace(tmp, out)  # no partial output on failure
     return 0
+
+
+def _nib_bundle(xib):
+    """Apple writes a nib bundle (objects-14.0+.nib and runtime.nib, both the
+    flat nib's bytes) for a xib declaring a deployment below iOS 14.0 that uses
+    a system (SF Symbol) image: probe system-image-bundle."""
+    root = ET.parse(xib).getroot()
+    dep = root.find("dependencies/deployment[@identifier='iOS']")
+    if dep is None or dep.get("version") is None:
+        return False
+    if int(dep.get("version")) >= 0x1400:
+        return False
+    return any(e.get("catalog") == "system" for e in root.iter())
 
 
 def _main_link(action_args):
