@@ -1260,6 +1260,43 @@ def stack_view(x, el):
     return o
 
 
+# blurEffect style -> (UIBlurEffectMaterialStyle, UIBlurEffectStyle); only the
+# styles measured (VCSubjectSearchPopover golden).
+BLUR_STYLES = {"systemUltraThinMaterialLight": (11, 1)}
+
+
+def visual_effect_view(x, el):
+    """<visualEffectView>: a blur effect and a content view, which the objects
+    list holds as the effect view's child though it is not among its subviews."""
+    check(x, el, VIEW_ATTRS, VIEW_SUBS | {"view", "blurEffect"})
+    b = x.b
+    blur = el.find("blurEffect")
+    cv_el = el.find("view[@key='contentView']")
+    if blur is None or cv_el is None or set(blur.attrib) != {"style"} \
+            or blur.get("style") not in BLUR_STYLES or el.find("subviews") is not None:
+        _fail(el, "effect view shape", x.where)
+    o = new_view_obj(x, el, "UIVisualEffectView")
+    view_keys(x, el, o, top=el in x.tops, opaque=False)
+    check(x, cv_el, VIEW_ATTRS, VIEW_SUBS)
+    cv = x.new("_UIVisualEffectContentView")
+    cv.swap = None
+    x.ids[cv_el.get("id")] = cv
+    x.els[cv_el.get("id")] = cv_el
+    view_keys(x, cv_el, cv, top=False)
+    for v in (o, cv):
+        x.put(v, "UIShouldNotAdaptToMaterials", YES)
+    x.subtree[o.idx]["kids"] = [cv]
+    effect = x.new("UIBlurEffect")
+    material, style = BLUR_STYLES[blur.get("style")]
+    x.put(effect, "UIBlurEffectMaterialStyle", b.int8(material))
+    x.put(effect, "UIBlurEffectStyle", b.int8(style))
+    x.put(o, "UIVisualEffectViewEffect", effect)
+    x.put(o, "UIVisualEffectViewGroupName", (N.NIL, None))
+    x.put(o, "UIVisualEffectViewContentView", cv)
+    finish_swap(x, o)
+    return o
+
+
 TABLE_ATTRS = SCROLL_ATTRS | {"style", "separatorStyle", "allowsSelection", "rowHeight",
                               "estimatedRowHeight", "sectionHeaderHeight",
                               "sectionFooterHeight", "contentViewInsetsToSafeArea"}
@@ -1299,6 +1336,7 @@ def table_view(x, el):
 
 BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
             "tableView": table_view, "stackView": stack_view,
+            "visualEffectView": visual_effect_view,
             "segmentedControl": segmented_control, "tableViewCell": table_view_cell,
             "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
