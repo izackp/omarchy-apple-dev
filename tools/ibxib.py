@@ -157,6 +157,7 @@ class X:
         self.els = {}         # xib id -> element
         self.connections = []  # (kind, source obj, element)
         self.pairs = []       # (owner element, target obj, None for runtime attributes | (key path, rect))
+        self.accessibility = []  # (target obj, label)
         self.subtree = {}     # obj idx -> (guide placeholders, constraints, kids)
 
     def new(self, cls, orig=None):
@@ -424,6 +425,8 @@ def check(x, el, attrs, subs):
             _fail(el, f"unsupported subelement <{ch.tag} key={ch.get('key')}>", x.where)
         if ch.tag == "color" and ch.get("key") not in x.colors_ok:
             _fail(el, f"unsupported color key {ch.get('key')}", x.where)
+        if ch.tag == "accessibility" and set(ch.attrib) != {"key", "label"}:
+            _fail(ch, f"accessibility {sorted(ch.attrib)}", x.where)
 
 
 def view_keys(x, el, o, top, default_mask=36, opaque=True):
@@ -728,7 +731,7 @@ BUTTON_ATTRS = VIEW_ATTRS | CONTROL_ATTRS | {"buttonType", "lineBreakMode",
                                              "adjustsImageWhenHighlighted",
                                              "adjustsImageWhenDisabled", "showsTouchWhenHighlighted",
                                              "reversesTitleShadowWhenHighlighted"}
-BUTTON_SUBS = VIEW_SUBS | {"fontDescription", "state", "inset", "buttonConfiguration"}
+BUTTON_SUBS = VIEW_SUBS | {"fontDescription", "state", "inset", "buttonConfiguration", "accessibility"}
 BUTTON_STATES = {"normal": 0, "highlighted": 1, "disabled": 2, "selected": 4}
 BUTTON_TYPES = {"system": 1, "detailDisclosure": 2, "infoLight": 3, "infoDark": 4,
                 "contactAdd": 5, "roundedRect": 1, "close": 7}
@@ -826,6 +829,9 @@ def button(x, el):
     o = new_view_obj(x, el, "UIButton")
     view_keys(x, el, o, top=el in x.tops)
     control_keys(x, el, o)
+    acc = el.find("accessibility[@key='accessibilityConfiguration']")
+    if acc is not None:
+        x.accessibility.append((o, acc.get("label")))
     cfg_el = el.find("buttonConfiguration[@key='configuration']")
     if cfg_el is not None:
         # A configured button keeps only the configuration: no stateful
@@ -1441,7 +1447,14 @@ def compile_xib(path, I):
     x.put(root, "UINibObjectsKey", x.array(listed))
     x.put(root, "UINibConnectionsKey", x.array(conns) if conns else empty)
     x.put(root, "UINibVisibleWindowsKey", empty)
-    x.put(root, "UINibAccessibilityConfigurationsKey", empty)
+    acc = []
+    for target, label in x.accessibility:
+        # Apple's key is spelled "Accessibile" (VCSplash golden).
+        a = x.new("UIRuntimeAccessibilityConfiguration")
+        x.put(a, "UIAccessibileObject", target)
+        x.put(a, "UIAccessibilityLabel", x.s(label))
+        acc.append(a)
+    x.put(root, "UINibAccessibilityConfigurationsKey", x.array(acc) if acc else empty)
     x.put(root, "UINibTraitStorageListsKey", empty)
     x.put(root, "UINibKeyValuePairsKey", x.array(pairs) if pairs else empty)
     x.put(root, "IBUINibLNEVersionKey", x.b.int8(1))
