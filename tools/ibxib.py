@@ -272,7 +272,14 @@ _GEN_TO_SRGB = (lambda a, b: tuple(tuple(sum(a[r][k] * b[k][c] for k in range(3)
 
 
 def _generic_gamma(v):
+    """Generic RGB / Generic Gray's curve as ColorSync evaluates it: x^1.8, but
+    linear (x/16) below 1/32, where the two meet. Without the linear segment a
+    component of 0.015 came out 0.0055 off; with it every sample of
+    ColorSync's output is within 3.4e-7 (ColorSync's own pow approximation,
+    which no libm or Accelerate function reproduces exactly, is the rest)."""
     v = _f32(v)
+    if abs(v) < 1 / 32:
+        return v / 16
     return (-1.0 if v < 0 else 1.0) * abs(v) ** _f32(1.8)
 
 
