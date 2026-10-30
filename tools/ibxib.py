@@ -388,9 +388,12 @@ def _resize_axis(x, el, pos, size, old, new, flex_lo, flex_size, flex_hi):
 
 
 def resize_top(x, el):
-    """Apple lays a top-level <view> without simulated metrics out at the
-    document device's screen size, autoresizing its subviews."""
+    """Below iOS 17.0, Apple lays a top-level <view> without simulated metrics
+    out at the document device's screen size, autoresizing its subviews (probe
+    resize-device: 320x568 on retina6_12 becomes 393x852 at 16.9, stays at 17.0)."""
     dev = x.doc.find("device")
+    if x.I.MIN_DEPLOYMENT is None or x.I.MIN_DEPLOYMENT >= (17, 0):
+        return
     if el.tag != "view" or dev is None or el.find("freeformSimulatedSizeMetrics") is not None:
         return
     if dev.get("id") not in DEVICE_SIZES or dev.get("orientation", "portrait") != "portrait":

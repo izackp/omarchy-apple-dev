@@ -34,9 +34,14 @@ BYTE_IDENTICAL = [
     # File's Owner customClass/customModule leave the nib unchanged (its golden
     # equals swap.nib's).
     "owner-module",
+    # Below iOS 17.0 a top-level view is laid out at the device's screen size
+    # (compiled with --minimum-deployment-target 16.9, see DEPLOYMENT).
+    "resize-device",
     "swap",
     "tools-new",
 ]
+# Probes compiled for another deployment target than FLAGS' 17.0.
+DEPLOYMENT = {"resize-device": "16.9"}
 
 
 class Probes(unittest.TestCase):
@@ -45,7 +50,8 @@ class Probes(unittest.TestCase):
             for name in BYTE_IDENTICAL:
                 with self.subTest(probe=name):
                     out = Path(tmp, f"{name}.nib")
-                    p = subprocess.run([sys.executable, str(IBTOOL), *FLAGS, "--compile",
+                    flags = [DEPLOYMENT.get(name, f) if f == "17.0" else f for f in FLAGS]
+                    p = subprocess.run([sys.executable, str(IBTOOL), *flags, "--compile",
                                         str(out), str(SRC / f"{name}.xib")],
                                        capture_output=True, text=True, timeout=280)
                     self.assertEqual(p.returncode, 0, p.stderr)
