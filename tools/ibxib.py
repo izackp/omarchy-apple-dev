@@ -1,0 +1,986 @@
+"""General iOS xib compiler: XIB -> object graph -> NIBArchive.
+
+tools/ibtool's compile_xib grew one golden at a time and fixes its object
+creation order by hand. This compiler relies on three facts measured on 130
+nibs from Apple's ibtool 27 (tools/nibkeys-mine.py, the PhotoDay corpus):
+
+- Object order is the depth-first preorder of the reference graph from the
+  root, following each object's references in value order. Building the graph
+  in any order and renumbering reproduces Apple's table.
+- Each class writes its keys in one fixed order (tools/nibkeys.json). A
+  UIClassSwapper writes its original class's keys, then UIClassName and
+  UIOriginalClassName.
+- NSString, NSNumber, UIFont, UIImageNibPlaceholder and UIColor objects are
+  shared by value.
+
+So a builder only has to get the graph right: which objects, which keys, which
+values. finalize_dfs() orders keys and objects and hands the result to
+tools/ibtool's finalize() for the key and class tables.
+
+compile_xib() raises Unsupported for anything it does not know; tools/ibtool
+then falls back to its older compiler.
+"""
+import json
+import os
+import struct
+import xml.etree.ElementTree as ET
+
+_TOOLS = os.path.dirname(os.path.abspath(__file__))
+import nibarchive as N  # noqa: E402
+
+with open(os.path.join(_TOOLS, "nibkeys.json")) as _f:
+    KEY_ORDER = json.load(_f)
+
+SWAP_TAIL = ("UIClassName", "UIOriginalClassName")
+CONTAINERS = {"NSArray", "NSMutableArray", "NSDictionary", "NSMutableDictionary"}
+INTERNED = {"NSString", "NSNumber", "UIFont", "UIFontDescriptor", "UIImageNibPlaceholder",
+            "UIColor"}
+
+# nibarchive names the two boolean value types the other way round from what
+# UIKit decodes: a "false"-typed value is YES (UIOpaque on an opaque view,
+# UIHidden on a hidden one).
+YES = (N.FALSE, None)
+NO = (N.TRUE, None)
+
+
+class Unsupported(Exception):
+    pass
+
+
+def _f32(v):
+    return struct.unpack("<f", struct.pack("<f", v))[0]
+
+
+# ---------------------------------------------------------------- finalize
+
+def _sort_keys(o):
+    if o.cls in CONTAINERS:
+        return
+    cls = o.cls
+    tail = ()
+    if cls == "UIClassSwapper":
+        orig = [v for k, v in o.values if k == "UIOriginalClassName"]
+        cls = o.original_class
+        tail = SWAP_TAIL
+    order = KEY_ORDER.get(cls)
+    if order is None:
+        raise Unsupported(f"no key order known for class {cls}")
+    pos = {k: i for i, k in enumerate(order)}
+    pos.update({k: len(order) + i for i, k in enumerate(tail)})
+    for k, _ in o.values:
+        if k not in pos:
+            raise Unsupported(f"{cls}: key {k} not seen in Apple's nibs")
+    o.values.sort(key=lambda kv: pos[kv[0]])
+
+
+def _signature(o, objs, memo):
+    """Structural identity of an interned object."""
+    if o.idx in memo:
+        return memo[o.idx]
+    memo[o.idx] = None  # cycle guard
+    parts = [o.cls]
+    for k, v in o.values:
+        if v.type == N.OBJREF:
+            parts.append((k, _signature(objs[v.payload], objs, memo)))
+        else:
+            parts.append((k, v.type, v.payload))
+    memo[o.idx] = tuple(parts)
+    return memo[o.idx]
+
+
+def finalize_dfs(I, b, root):
+    """Order keys, share equal leaf objects, renumber depth-first from the root."""
+    for o in b.objects:
+        _sort_keys(o)
+    memo, canon, alias = {}, {}, {}
+    for o in b.objects:
+        if o.cls in INTERNED:
+            sig = _signature(o, b.objects, memo)
+            alias[o.idx] = canon.setdefault(sig, o.idx)
+    nb = I.Builder()
+    made = {}
+
+    def visit(o):
+        o = b.objects[alias.get(o.idx, o.idx)]
+        if o.idx in made:
+            return made[o.idx]
+        n = nb.new(o.cls)
+        made[o.idx] = n
+        for k, v in o.values:
+            if v.type == N.OBJREF:
+                n.add(k, N.OBJREF, visit(b.objects[v.payload]).idx)
+            else:
+                n.add(k, v.type, v.payload)
+        return n
+
+    import sys
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
+    return I.finalize(nb, visit(root))
+
+
+# ---------------------------------------------------------------- context
+
+class X:
+    """One compile: the builder, document resources, and what later passes need."""
+
+    def __init__(self, I, path, doc):
+        self.I = I
+        self.b = I.Builder()
+        self.path = path
+        self.where = os.path.basename(path)
+        self.doc = doc
+        self.resources, self.named = I._parse_color_resources(doc, path)
+        self.ids = {}         # xib id -> Obj
+        self.els = {}         # xib id -> element
+        self.connections = []  # (kind, source obj, element)
+        self.pairs = []       # (element, target obj)
+        self.subtree = {}     # obj idx -> (guide placeholders, constraints, kids)
+
+    def new(self, cls, orig=None):
+        o = self.b.new(cls)
+        o.original_class = orig
+        return o
+
+    def put(self, o, key, value):
+        """Add a key; value is a (type, payload) pair or an Obj."""
+        if hasattr(value, "idx"):
+            value = (N.OBJREF, value.idx)
+        o.add(key, *value)
+
+    def s(self, text):
+        return self.b.string(text)
+
+    def array(self, items, cls="NSArray"):
+        a = self.new(cls)
+        a.add("NSInlinedValue", *YES)
+        for it in items:
+            a.add("UINibEncoderEmptyKey", N.OBJREF, it.idx)
+        return a
+
+
+def _bool(el, name):
+    return el.get(name) == "YES"
+
+
+def _fail(el, what, where):
+    raise Unsupported(f"<{el.tag} id={el.get('id')}> {what} ({where})")
+
+
+# ---------------------------------------------------------------- colors
+
+def color(x, el):
+    """A <color> element -> UIColor."""
+    if el is None:
+        return None
+    b, I = x.b, x.I
+    a = el.attrib
+    if "systemColor" in a:
+        try:
+            return I.build_color(b, a["systemColor"], x.where, x.resources)
+        except I.XibError as e:
+            raise Unsupported(str(e))
+    if "name" in a:
+        try:
+            return I.build_named_color(b, a["name"], x.named, x.where)
+        except I.XibError as e:
+            raise Unsupported(str(e))
+    space = a.get("customColorSpace") if a.get("colorSpace") == "custom" else a.get("colorSpace")
+    if "white" in a:
+        w, al = float(a["white"]), float(a.get("alpha", "1"))
+        if space in ("genericGamma22GrayColorSpace", "calibratedWhite"):
+            if space == "calibratedWhite" and (w, al) not in ((1.0, 1.0), (0.0, 0.0), (0.0, 1.0)):
+                return _white_components(x, x.new("UIColor"), _encode_srgb(_generic_gamma(w)), al)
+            name = {(1.0, 1.0): "whiteColor", (0.0, 0.0): "clearColor",
+                    (0.0, 1.0): "blackColor"}.get((w, al))
+            if name:
+                c = x.new("UIColor")
+                x.put(c, "UISystemColorName", x.s(name))
+                return _white_components(x, c, w, al)
+            return _white_components(x, x.new("UIColor"), w, al)
+        _fail(el, f"white color in {space}", x.where)
+    if "red" in a:
+        comps = [float(a[k]) for k in ("red", "green", "blue")] + [float(a.get("alpha", "1"))]
+        if space == "sRGB":
+            return _rgb_components(x, x.new("UIColor"), comps)
+        if space == "calibratedRGB":
+            return _rgb_components(x, x.new("UIColor"), generic_to_srgb(comps[:3]) + [comps[3]],
+                                   converted=True)
+        _fail(el, f"RGB color in {space} needs a color-space conversion", x.where)
+    _fail(el, f"color {dict(a)}", x.where)
+
+
+# Interface Builder stores calibrated (Generic RGB / Generic Gray) colors as
+# extended sRGB. The conversion is ColorSync's matrix/TRC path: Generic RGB's
+# gamma 1.8, its primaries and sRGB's (from the profiles' rXYZ/gXYZ/bXYZ, each
+# matrix row-scaled so white maps to D50), then the sRGB curve, mirrored for
+# negative values. Constants are float32, as ColorSync computes.
+_GENERIC_RGB = ((0.4542999267578125, 0.3533477783203125, 0.156646728515625),
+                (0.241912841796875, 0.6736297607421875, 0.0844573974609375),
+                (0.014892578125, 0.09063720703125, 0.719573974609375))
+_SRGB = ((0.436065673828125, 0.3851470947265625, 0.14306640625),
+         (0.2224884033203125, 0.7168731689453125, 0.06060791015625),
+         (0.013916015625, 0.097076416015625, 0.7140960693359375))
+_D50 = (0.9642, 1.0, 0.8249)
+
+
+def _inv3(m):
+    (a, b, c), (d, e, f), (g, h, i) = m
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    return ((e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det), \
+        ((f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det), \
+        ((d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det)
+
+
+def _white_scaled(m):
+    return tuple(tuple(v * _D50[r] / sum(m[r]) for v in m[r]) for r in range(3))
+
+
+_GEN_TO_SRGB = (lambda a, b: tuple(tuple(sum(a[r][k] * b[k][c] for k in range(3))
+                                         for c in range(3)) for r in range(3)))(
+    _inv3(_white_scaled(_SRGB)), _white_scaled(_GENERIC_RGB))
+
+
+def _generic_gamma(v):
+    v = _f32(v)
+    return (-1.0 if v < 0 else 1.0) * abs(v) ** _f32(1.8)
+
+
+def _encode_srgb(v):
+    a = abs(v)
+    out = a * 12.92 if a <= 0.0031308 else _f32(1.055) * a ** _f32(1 / 2.4) - _f32(0.055)
+    return -out if v < 0 else out
+
+
+def generic_to_srgb(rgb):
+    lin = [_generic_gamma(v) for v in rgb]
+    return [_encode_srgb(sum(_GEN_TO_SRGB[r][k] * lin[k] for k in range(3))) for r in range(3)]
+
+
+def _white_components(x, c, w, al):
+    x.put(c, "UIColorComponentCount", x.b.int8(2))
+    for k, v in (("UIWhite", w), ("UIAlpha", al)):
+        x.put(c, k, x.b.float32(v))
+        if _f32(v) != v:
+            x.put(c, k + "-Double", x.b.float64(v))
+    comps = (w,) if al == 1.0 else (w, al)
+    x.put(c, "NSWhite", (N.DATA, " ".join(f"{v:.3g}" for v in comps).encode()))
+    x.put(c, "NSColorSpace", x.b.int8(4))
+    return c
+
+
+def _rgb_components(x, c, comps, converted=False):
+    """converted: components computed in float32 (a color-space conversion), so
+    they have no -Double values except the document's own alpha."""
+    x.put(c, "UIColorComponentCount", x.b.int8(4))
+    for i, (k, v) in enumerate(zip(("UIRed", "UIGreen", "UIBlue", "UIAlpha"), comps)):
+        if converted and i < 3:
+            v = _f32(v)
+        x.put(c, k, x.b.float32(v))
+        if _f32(v) != v:
+            x.put(c, k + "-Double", x.b.float64(v))
+    shown = comps[:3] if comps[3] == 1.0 else comps
+    x.put(c, "NSRGB", (N.DATA, " ".join(f"{v:.3g}" for v in shown).encode()))
+    x.put(c, "NSColorSpace", x.b.int8(2))
+    return c
+
+
+def keyed_color(x, el, key):
+    return color(x, el.find(f"color[@key='{key}']"))
+
+
+# ---------------------------------------------------------------- views
+
+def _frame(x, el):
+    r = el.find("rect[@key='frame']")
+    if r is None:
+        return (0.0, 0.0, 1000.0, 1000.0)
+    return tuple(float(r.get(k, "0")) for k in ("x", "y", "width", "height"))
+
+
+def _mask(x, el, default):
+    m = el.find("autoresizingMask[@key='autoresizingMask']")
+    if m is None:
+        return default
+    v = 0
+    for flag, bit in x.I.RESIZE_FLAGS.items():
+        if m.get(flag) == "YES":
+            v |= bit
+    return v
+
+
+CONTENT_MODES = {"scaleToFill": 0, "scaleAspectFit": 1, "scaleAspectFill": 2, "redraw": 3,
+                 "center": 4, "top": 5, "bottom": 6, "left": 7, "right": 8, "topLeft": 9,
+                 "topRight": 10, "bottomLeft": 11, "bottomRight": 12}
+VIEW_ATTRS = {"id", "key", "contentMode", "opaque", "clipsSubviews", "hidden", "alpha",
+              "userInteractionEnabled", "clearsContextBeforeDrawing", "multipleTouchEnabled",
+              "translatesAutoresizingMaskIntoConstraints", "customClass", "customModule",
+              "customModuleProvider", "userLabel", "misplaced", "ambiguous", "fixedFrame",
+              "autoresizesSubviews", "horizontalHuggingPriority", "verticalHuggingPriority",
+              "horizontalCompressionResistancePriority",
+              "verticalCompressionResistancePriority", "tag", "semanticContentAttribute",
+              "insetsLayoutMarginsFromSafeArea", "preservesSuperviewLayoutMargins",
+              "restorationIdentifier"}
+VIEW_SUBS = {"rect", "autoresizingMask", "subviews", "constraints", "color",
+             "viewLayoutGuide", "keyboardLayoutGuide", "userDefinedRuntimeAttributes",
+             "connections", "point", "freeformSimulatedSizeMetrics", "nil"}
+VIEW_COLORS = {"backgroundColor", "tintColor", "textColor", "highlightedColor", "shadowColor"}
+
+
+def _custom_class(x, el):
+    cls = el.get("customClass")
+    if not cls:
+        return None
+    module = el.get("customModule")
+    if el.get("customModuleProvider") == "target" and x.I.TARGET_MODULE:
+        module = x.I.TARGET_MODULE
+    return f"_TtC{len(module)}{module}{len(cls)}{cls}" if module else cls
+
+
+def new_view_obj(x, el, cls):
+    swift = _custom_class(x, el)
+    if swift:
+        o = x.new("UIClassSwapper", orig=cls)
+        o.swap = (swift, cls)
+    else:
+        o = x.new(cls)
+        o.swap = None
+    if el.get("id"):
+        x.ids[el.get("id")] = o
+        x.els[el.get("id")] = el
+    return o
+
+
+def finish_swap(x, o):
+    if o.swap:
+        x.put(o, "UIClassName", x.s(o.swap[0]))
+        x.put(o, "UIOriginalClassName", x.s(o.swap[1]))
+
+
+def check(x, el, attrs, subs):
+    extra = set(el.attrib) - attrs
+    if extra:
+        _fail(el, f"unsupported attributes {sorted(extra)}", x.where)
+    for ch in el:
+        if ch.tag not in subs:
+            _fail(el, f"unsupported subelement <{ch.tag} key={ch.get('key')}>", x.where)
+        if ch.tag == "color" and ch.get("key") not in x.colors_ok:
+            _fail(el, f"unsupported color key {ch.get('key')}", x.where)
+
+
+def view_keys(x, el, o, top, default_mask=36):
+    """The UIView part of any view: geometry, flags, colors, subviews,
+    constraints, layout guides. Records the view's subtree for UINibObjectsKey."""
+    b = x.b
+    fx, fy, w, h = _frame(x, el)
+    x.put(o, "UIBounds", b.geom(0.0, 0.0, w, h))
+    x.put(o, "UICenter", b.geom(fx + w / 2, fy + h / 2))
+    kids = []
+    subs = el.find("subviews")
+    if subs is not None:
+        for ch in subs:
+            kids.append(build(x, ch))
+        x.put(o, "UISubviews", x.array(kids, "NSMutableArray"))
+    bg = keyed_color(x, el, "backgroundColor")
+    if bg is not None:
+        x.put(o, "UIBackgroundColor", bg)
+    x.put(o, "UIDeepDrawRect", YES)
+    if el.get("opaque") != "NO":
+        x.put(o, "UIOpaque", YES)
+    if _bool(el, "hidden"):
+        x.put(o, "UIHidden", YES)
+    if el.get("userInteractionEnabled") == "NO":
+        x.put(o, "UIUserInteractionDisabled", YES)
+    x.put(o, "UIAutoresizeSubviews", YES)
+    mask = _mask(x, el, 18 if top else default_mask)
+    if mask:
+        x.put(o, "UIAutoresizingMask", b.int8(mask))
+    if _bool(el, "clipsSubviews"):
+        x.put(o, "UIClipsToBounds", YES)
+    if el.get("clearsContextBeforeDrawing") == "NO":
+        x.put(o, "UIClearsContextBeforeDrawing", NO)
+    if el.get("alpha") is not None:
+        x.put(o, "UIAlpha", b.float32(float(el.get("alpha"))))
+    mode = el.get("contentMode", "scaleToFill")
+    if mode not in CONTENT_MODES:
+        _fail(el, f"contentMode {mode}", x.where)
+    if mode != "scaleToFill":
+        x.put(o, "UIContentMode", b.int8(CONTENT_MODES[mode]))
+    if el.get("horizontalHuggingPriority") or el.get("verticalHuggingPriority"):
+        x.put(o, "UIViewContentHuggingPriority", x.s(
+            f"{{{el.get('horizontalHuggingPriority', '250')}, "
+            f"{el.get('verticalHuggingPriority', '250')}}}"))
+    if (el.get("horizontalCompressionResistancePriority")
+            or el.get("verticalCompressionResistancePriority")):
+        x.put(o, "UIViewContentCompressionResistancePriority", x.s(
+            f"{{{el.get('horizontalCompressionResistancePriority', '750')}, "
+            f"{el.get('verticalCompressionResistancePriority', '750')}}}"))
+    if el.get("insetsLayoutMarginsFromSafeArea") == "NO":
+        x.put(o, "UIViewInsetsLayoutMarginsFromSafeArea", b.int8(0))
+    tint = keyed_color(x, el, "tintColor")
+    if tint is not None:
+        x.put(o, "UITintColor", tint)
+    x.put(o, "UIViewSemanticContentAttribute", b.int8(0))
+    x.put(o, "UIViewLargeContentStoredProperties", (N.NIL, None))
+    x.subtree[o.idx] = {"el": el, "kids": kids, "cons": [], "guides": []}
+    if el.find("userDefinedRuntimeAttributes") is not None:
+        x.pairs.append((el, o))
+    conns = el.find("connections")
+    if conns is not None:
+        x.connections.append((o, conns))
+    return o
+
+
+def view(x, el):
+    check(x, el, VIEW_ATTRS, VIEW_SUBS)
+    o = new_view_obj(x, el, "UIView")
+    view_keys(x, el, o, top=el in x.tops)
+    finish_swap(x, o)
+    return o
+
+
+# fontDescription weight -> (PostScript name, CTFont UI usage, UIFontTraits)
+SYSTEM_WEIGHTS = {"regular": (".SFUI-Regular", "CTFontRegularUsage", 0),
+                  "medium": (".SFUI-Medium", "CTFontMediumUsage", 0),
+                  "semibold": (".SFUI-Semibold", "CTFontDemiUsage", 2)}
+
+
+def system_font(x, size, weight="regular", bold=False):
+    """A system UIFont: the name, a descriptor naming the UI usage, the size."""
+    b = x.b
+    if bold:
+        name, usage, traits = ".SFUI-Bold", "CTFontEmphasizedUsage", 2
+    elif weight in SYSTEM_WEIGHTS:
+        name, usage, traits = SYSTEM_WEIGHTS[weight]
+    else:
+        raise Unsupported(f"system font weight {weight}")
+    attrs = x.new("NSMutableDictionary" if bold else "NSDictionary")
+    attrs.add("NSInlinedValue", *YES)
+    entries = [("NSCTFontUIUsageAttribute", x.s(usage))]
+    if bold:
+        entries.append(("NSCTFontUIUsageOverrideAttribute", x.s("CTFontBoldUsage")))
+    num = x.new("NSNumber")
+    x.put(num, "NS.dblval", b.float64(size))
+    entries.append(("NSFontSizeAttribute", num))
+    for k, v in entries:
+        attrs.add("UINibEncoderEmptyKey", N.OBJREF, x.s(k).idx)
+        attrs.add("UINibEncoderEmptyKey", N.OBJREF, v.idx)
+    desc = x.new("UIFontDescriptor")
+    x.put(desc, "UIFontDescriptorAttributes", attrs)
+    x.put(desc, "UIFontDescriptorOptions", b.int64(2147517444))
+    f = x.new("UIFont")
+    x.put(f, "UIFontName", x.s(name))
+    x.put(f, "UIFontDescriptor", desc)
+    x.put(f, "UIFontPointSize", b.float64(size))
+    x.put(f, "UIFontTextStyleForScaling", (N.NIL, None))
+    x.put(f, "UIFontPointSizeForScaling", b.float64(0.0))
+    x.put(f, "UIFontMaximumPointSizeAfterScaling", b.float64(0.0))
+    x.put(f, "UIFontTraits", b.int8(traits))
+    x.put(f, "UISystemFont", YES)
+    x.put(f, "NSName", x.s(name))
+    x.put(f, "NSSize", b.float64(size))
+    return f
+
+
+def font(x, el):
+    """A <fontDescription>."""
+    if el is None:
+        return None
+    a = el.attrib
+    if a.get("style"):
+        try:
+            return x.I.build_font(x.b, el, x.where)
+        except x.I.XibError as e:
+            raise Unsupported(str(e))
+    size = float(a["pointSize"])
+    if a.get("type") == "system":
+        return system_font(x, size, a.get("weight", "regular"))
+    if a.get("type") == "boldSystem":
+        return system_font(x, size, bold=True)
+    if a.get("name") == ".AppleSystemUIFont" and "type" not in a:
+        return system_font(x, size)
+    raise Unsupported(f"fontDescription {dict(a)}")
+
+
+LABEL_ATTRS = VIEW_ATTRS | {
+    "text", "textAlignment", "lineBreakMode", "baselineAdjustment", "adjustsFontSizeToFit",
+    "minimumFontSize", "minimumScaleFactor", "numberOfLines", "adjustsLetterSpacingToFitWidth",
+    "preferredMaxLayoutWidth", "adjustsFontForContentSizeCategory", "highlighted", "enabled"}
+LABEL_SUBS = VIEW_SUBS | {"fontDescription", "nil"}
+
+
+def label(x, el):
+    check(x, el, LABEL_ATTRS, LABEL_SUBS)
+    b = x.b
+    o = new_view_obj(x, el, "UILabel")
+    view_keys(x, el, o, top=el in x.tops)
+    if el.get("text") is None:
+        _fail(el, "label without text (attributed?)", x.where)
+    x.put(o, "UIText", x.s(el.get("text")))
+    fd = el.find("fontDescription")
+    x.put(o, "UIFont", font(x, fd))
+    tc = keyed_color(x, el, "textColor")
+    if tc is None:
+        tc = x.I.build_color(b, "labelColor", x.where)
+    x.put(o, "UITextColor", tc)
+    x.put(o, "UIShadowOffset", b.geom(0.0, -1.0))
+    ta = el.get("textAlignment", "left")
+    x.put(o, "UITextAlignment", b.int8(x.I.TEXT_ALIGNMENTS[ta]))
+    if el.get("adjustsFontSizeToFit") != "NO":
+        x.put(o, "UIAdjustsFontSizeToFit", YES)
+    ps = fd.get("pointSize") if fd is not None else None
+    if el.get("adjustsFontSizeToFit") != "NO":
+        msf = el.get("minimumScaleFactor")
+        mfs = el.get("minimumFontSize")
+        if mfs is None and msf is not None and ps:
+            mfs_v = _f32(float(msf)) * float(ps)
+        else:
+            mfs_v = float(mfs or "8.5")
+        x.put(o, "UIMinimumFontSize", b.float32(mfs_v))
+        if msf is not None:
+            x.put(o, "UIMinimumScaleFactor", b.float32(float(msf)))
+        elif mfs is not None and ps:
+            x.put(o, "UIMinimumScaleFactor", b.float32(float(mfs) / float(ps)))
+    nol = el.get("numberOfLines", "1")
+    if nol != "1":
+        x.put(o, "UINumberOfLines", b.int_fit(int(nol)))
+    lbm = el.get("lineBreakMode", "tailTruncation")
+    if lbm != "tailTruncation":
+        x.put(o, "UILineBreakMode", b.int8(x.I.LINE_BREAK_MODES[lbm]))
+    if el.get("baselineAdjustment", "alignBaselines") != "alignBaselines":
+        x.put(o, "UIBaselineAdjustment", b.int8({"none": 2, "alignCenters": 1}[el.get("baselineAdjustment")]))
+    if _bool(el, "adjustsLetterSpacingToFitWidth"):
+        x.put(o, "UIAdjustsLetterSpacingToFit", YES)
+    if _bool(el, "adjustsFontForContentSizeCategory"):
+        x.put(o, "UIAdjustsFontForContentSizeCategory", YES)
+    if el.get("preferredMaxLayoutWidth") is not None:
+        x.put(o, "UIPreferredMaxLayoutWidth", b.float32(float(el.get("preferredMaxLayoutWidth"))))
+    x.put(o, "UIDisableUpdateTextColorOnTraitCollectionChange",
+          NO if el.find("nil[@key='textColor']") is not None else YES)
+    finish_swap(x, o)
+    return o
+
+
+SYMBOL_SCALES = {"default": 0, "unspecified": -1, "small": 1, "medium": 2, "large": 3}
+SYMBOL_WEIGHTS = {"ultraLight": 1, "thin": 2, "light": 3, "regular": 4, "medium": 5,
+                  "semibold": 6, "bold": 7, "heavy": 8, "black": 9}
+
+
+def symbol_configuration(x, el, scale_attr="scale", weight_attr="weight"):
+    """UIImageSymbolConfiguration from an element's scale/weight attributes, or None."""
+    scale, weight = el.get(scale_attr), el.get(weight_attr)
+    if scale is None and weight is None:
+        return None
+    c = x.new("UIImageSymbolConfiguration")
+    if scale is not None:
+        x.put(c, "UISymbolScale", x.b.int8(SYMBOL_SCALES[scale]))
+    if weight is not None:
+        x.put(c, "UISymbolWeight", x.b.int8(SYMBOL_WEIGHTS[weight]))
+    return c
+
+
+def image(x, name, catalog=None, ref=None):
+    """An image by name: a named-resource placeholder (width/height 1 when the
+    catalog is not available to ibtool), or an SF Symbol for catalog="system",
+    with the imageReference's symbol scale."""
+    o = x.new("UIImageNibPlaceholder")
+    if catalog == "system":
+        x.put(o, "UIImageWidth", x.b.float32(0.0))
+        x.put(o, "UIImageHeight", x.b.float32(0.0))
+        x.put(o, "UIResourceName", x.s(name))
+        x.put(o, "UISystemSymbolResourceName", x.s(name))
+        cfg = symbol_configuration(x, ref, "symbolScale", "symbolWeight") if ref is not None else None
+        x.put(o, "UISymbolImageConfiguration", cfg or (N.NIL, None))
+    elif catalog is None:
+        x.put(o, "UIImageWidth", x.b.float32(1.0))
+        x.put(o, "UIImageHeight", x.b.float32(1.0))
+        x.put(o, "UIResourceName", x.s(name))
+        x.put(o, "UISystemSymbolResourceName", (N.NIL, None))
+        x.put(o, "UISymbolImageConfiguration", (N.NIL, None))
+    else:
+        raise Unsupported(f"image catalog {catalog}")
+    x.put(o, "UIResourceCatalogName", (N.NIL, None))
+    return o
+
+
+def image_ref(x, el, key):
+    """An element's image: an <imageReference key=...> child or image/catalog attributes."""
+    r = el.find(f"imageReference[@key='{key}']")
+    if r is not None:
+        extra = set(r.attrib) - {"key", "image", "catalog", "symbolScale", "symbolWeight",
+                                 "variableValue", "renderingMode"}
+        if extra or r.get("renderingMode"):
+            _fail(r, f"imageReference attributes {sorted(extra)}", x.where)
+        return image(x, r.get("image"), r.get("catalog"), r)
+    if el.get(key) is not None:
+        return image(x, el.get(key), el.get("catalog"))
+    return None
+
+
+IMAGE_VIEW_ATTRS = VIEW_ATTRS | {"image", "catalog", "highlightedImage", "adjustsImageSizeForAccessibilityContentSizeCategory"}
+IMAGE_VIEW_SUBS = VIEW_SUBS | {"imageReference", "preferredSymbolConfiguration"}
+
+
+def image_view(x, el):
+    check(x, el, IMAGE_VIEW_ATTRS, IMAGE_VIEW_SUBS)
+    if el.get("highlightedImage") or el.get("adjustsImageSizeForAccessibilityContentSizeCategory"):
+        _fail(el, "imageView attributes", x.where)
+    o = new_view_obj(x, el, "UIImageView")
+    view_keys(x, el, o, top=el in x.tops)
+    img = image_ref(x, el, "image")
+    if img is not None:
+        x.put(o, "UIImage", img)
+    p = el.find("preferredSymbolConfiguration[@key='preferredSymbolConfiguration']")
+    if p is not None:
+        x.put(o, "UIPreferredSymbolConfiguration", symbol_configuration(x, p))
+    finish_swap(x, o)
+    return o
+
+
+CONTROL_ATTRS = {"contentHorizontalAlignment", "contentVerticalAlignment", "enabled",
+                 "selected", "highlighted"}
+H_ALIGN = {"center": 0, "left": 1, "right": 2, "fill": 3, "leading": 4, "trailing": 5}
+V_ALIGN = {"center": 0, "top": 1, "bottom": 2, "fill": 3}
+
+
+def control_keys(x, el, o):
+    b = x.b
+    h = el.get("contentHorizontalAlignment", "center")
+    if h != "center":
+        x.put(o, "UIContentHorizontalAlignment", b.int8(H_ALIGN[h]))
+    v = el.get("contentVerticalAlignment", "center")
+    if v != "center":
+        x.put(o, "UIContentVerticalAlignment", b.int8(V_ALIGN[v]))
+    if el.get("enabled") == "NO":
+        x.put(o, "UIDisabled", YES)
+    if _bool(el, "selected"):
+        x.put(o, "UISelected", YES)
+    if _bool(el, "highlighted"):
+        x.put(o, "UIHighlighted", YES)
+
+
+BUTTON_ATTRS = VIEW_ATTRS | CONTROL_ATTRS | {"buttonType", "lineBreakMode",
+                                             "adjustsImageWhenHighlighted",
+                                             "adjustsImageWhenDisabled", "showsTouchWhenHighlighted",
+                                             "reversesTitleShadowWhenHighlighted"}
+BUTTON_SUBS = VIEW_SUBS | {"fontDescription", "state", "inset", "buttonConfiguration"}
+BUTTON_STATES = {"normal": 0, "highlighted": 1, "disabled": 2, "selected": 4}
+BUTTON_TYPES = {"system": 1, "detailDisclosure": 2, "infoLight": 3, "infoDark": 4,
+                "contactAdd": 5, "roundedRect": 1, "close": 7}
+
+
+def button(x, el):
+    check(x, el, BUTTON_ATTRS, BUTTON_SUBS)
+    b = x.b
+    if el.find("buttonConfiguration") is not None:
+        _fail(el, "buttonConfiguration", x.where)
+    o = new_view_obj(x, el, "UIButton")
+    view_keys(x, el, o, top=el in x.tops)
+    control_keys(x, el, o)
+    states = el.findall("state")
+    if states:
+        d = x.new("NSMutableDictionary")
+        d.add("NSInlinedValue", *YES)
+        for st in states:
+            num = x.new("NSNumber")
+            x.put(num, "NS.intval", b.int8(BUTTON_STATES[st.get("key")]))
+            c = x.new("UIButtonContent")
+            for k in st.attrib:
+                if k not in ("key", "title", "image", "catalog", "backgroundImage"):
+                    _fail(st, f"state attribute {k}", x.where)
+            if st.get("title") is not None:
+                x.put(c, "UITitle", x.s(st.get("title")))
+            if st.get("image") is not None:
+                x.put(c, "UIImage", image(x, st.get("image"), st.get("catalog")))
+            if st.get("backgroundImage") is not None:
+                x.put(c, "UIBackgroundImage", image(x, st.get("backgroundImage"), st.get("catalog")))
+            for ch in st:
+                if ch.tag != "color" or ch.get("key") not in ("titleColor", "titleShadowColor"):
+                    _fail(st, f"state child {ch.tag} {ch.get('key')}", x.where)
+            tc = keyed_color(x, st, "titleColor")
+            if tc is not None:
+                x.put(c, "UITitleColor", tc)
+            sc = keyed_color(x, st, "titleShadowColor")
+            if sc is not None:
+                x.put(c, "UIShadowColor", sc)
+            d.add("UINibEncoderEmptyKey", N.OBJREF, num.idx)
+            d.add("UINibEncoderEmptyKey", N.OBJREF, c.idx)
+        x.put(o, "UIButtonStatefulContent", d)
+    x.put(o, "UIAdjustsImageWhenHighlighted", YES)
+    x.put(o, "UIAdjustsImageWhenDisabled", YES)
+    if el.get("buttonType") is not None:
+        x.put(o, "UIButtonType", b.int8(BUTTON_TYPES[el.get("buttonType")]))
+    fd = el.find("fontDescription")
+    x.put(o, "UIFont", font(x, fd) if fd is not None else system_font(x, 18.0))
+    for ins in el.findall("inset"):
+        key = {"imageEdgeInsets": "UIImageEdgeInsets", "titleEdgeInsets": "UITitleEdgeInsets",
+               "contentEdgeInsets": "UIContentEdgeInsets"}.get(ins.get("key"))
+        if key is None:
+            _fail(ins, f"inset {ins.get('key')}", x.where)
+        x.put(o, key, b.geom(*(float(ins.get(k, "0")) for k in ("minY", "minX", "maxY", "maxX"))))
+    x.put(o, "UIButtonConfiguration", (N.NIL, None))
+    finish_swap(x, o)
+    return o
+
+
+BUILDERS = {"view": view, "label": label, "button": button, "imageView": image_view}
+
+
+def build(x, el):
+    f = BUILDERS.get(el.tag)
+    if f is None:
+        _fail(el, "unsupported element", x.where)
+    return f(x, el)
+
+
+# ---------------------------------------------------------------- constraints
+
+def _attr_code(I, a):
+    return I.ATTRIBUTES.get(a, I.MARGIN_V2.get(a, 0))
+
+
+def _constraint(x, c, owner_el, owner):
+    I, b = x.I, x.b
+    o = x.new("NSLayoutConstraint")
+
+    def item(i):
+        if i is None:
+            return owner
+        if i not in x.ids:
+            _fail(c, f"constraint item {i} unknown", x.where)
+        return x.ids[i]
+
+    for k in c.attrib:
+        if k not in ("firstItem", "firstAttribute", "secondItem", "secondAttribute",
+                     "constant", "id", "relation", "multiplier", "symbolic", "priority",
+                     "identifier"):
+            _fail(c, f"constraint attribute {k}", x.where)
+    fa, sa = c.get("firstAttribute"), c.get("secondAttribute")
+    x.put(o, "NSFirstItem", item(c.get("firstItem")))
+    x.put(o, "NSFirstAttributeV2", b.int8(_attr_code(I, fa)))
+    x.put(o, "NSFirstAttribute", b.int8(I.ATTRIBUTES.get(I.MARGIN_BASE.get(fa, fa), 0)))
+    rel = I.RELATIONS.get(c.get("relation", "equal"))
+    if rel is not None:
+        x.put(o, "NSRelation", b.int8(rel))
+    I._add_multiplier(b, o, c)
+    if c.get("secondItem") is not None:
+        x.put(o, "NSSecondItem", item(c.get("secondItem")))
+        x.put(o, "NSSecondAttributeV2", b.int8(_attr_code(I, sa)))
+        x.put(o, "NSSecondAttribute", b.int8(I.ATTRIBUTES.get(I.MARGIN_BASE.get(sa, sa), 0)))
+    if c.get("priority") is not None:
+        x.put(o, "NSPriority", b.int_fit(int(float(c.get("priority")))))
+
+    def margin(a):
+        return 8.0 if a in ("leadingMargin", "topMargin") else \
+            -8.0 if a in ("bottomMargin", "trailingMargin") else 0.0
+    is_margin = margin(fa) != 0.0 or margin(sa) != 0.0
+    legacy = margin(sa) - margin(fa)
+    if c.get("symbolic") == "YES":
+        x.put(o, "NSSymbolicConstant", x.s("NSSpace"))
+        x.put(o, "NSShouldBeArchived", YES)
+    elif c.get("constant") is not None:
+        v = float(c.get("constant"))
+        x.put(o, "NSConstantV2", b.float64(v))
+        x.put(o, "NSShouldBeArchived", YES)
+        x.put(o, "NSConstant", b.float64(v + legacy if is_margin else v))
+    elif is_margin:
+        x.put(o, "NSShouldBeArchived", YES)
+        x.put(o, "NSConstant", b.float64(legacy))
+    else:
+        x.put(o, "NSShouldBeArchived", YES)
+    if c.get("identifier") is not None:
+        x.put(o, "NSLayoutIdentifier", x.s(c.get("identifier")))
+    return o
+
+
+def _guides(x, el, o):
+    """Layout guides a view declares: the safe area (archived in
+    UIViewLayoutGuides, with its system constraints) and the keyboard guide
+    (archived only where a constraint uses it)."""
+    st = x.subtree[o.idx]
+    for g in el:
+        if g.tag == "viewLayoutGuide" and g.get("key") == "safeArea":
+            cache = []
+            guide = x.I._safe_area_guide(x.b, o, cache)
+            guide.original_class = None
+            for c in guide.values:
+                pass
+            x.ids[g.get("id")] = guide
+            st["guides"].append(("UILayoutGuide", guide))
+        elif g.tag == "keyboardLayoutGuide" and g.get("key") == "keyboard":
+            k = x.new("UIKeyboardLayoutGuide")
+            x.put(k, "UILayoutGuideOwningView", o)
+            x.put(k, "UILayoutGuideIdentifier", x.s("UIViewKeyboardLayoutGuide"))
+            x.put(k, "UILayoutGuideOwningViewIsLocked", YES)
+            x.put(k, "UILayoutGuideShouldBeArchived", NO)
+            x.put(k, "UILayoutGuideAllowsNegativeDimensions", NO)
+            x.put(k, "UILayoutGuideSystemConstraints", (N.NIL, None))
+            x.put(k, "UIKeyboardLayoutGuideFollowsUndocked", NO)
+            x.ids[g.get("id")] = k
+            st["guides"].append(("UIKeyboardLayoutGuide", k))
+        elif g.tag in ("viewLayoutGuide", "keyboardLayoutGuide"):
+            _fail(g, f"layout guide {g.get('key')}", x.where)
+
+
+def constraints_pass(x):
+    """After every view exists: guides, then each view's constraints in Apple's order."""
+    for idx, st in list(x.subtree.items()):
+        _guides(x, st["el"], x.b.objects[idx])
+    for idx, st in x.subtree.items():
+        o = x.b.objects[idx]
+        el = st["el"]
+        safe = [g for c, g in st["guides"] if c == "UILayoutGuide"]
+        if safe:
+            x.put(o, "UIViewLayoutGuides", x.array(safe, "NSMutableArray"))
+        cel = el.find("constraints")
+        if cel is None:
+            continue
+        try:
+            ordered = x.I._constraint_order(el, cel.findall("constraint"), x.where)
+        except x.I.XibError as e:
+            raise Unsupported(str(e))
+        cons = [_constraint(x, c, el, o) for c in ordered]
+        st["cons"] = cons
+        x.put(o, "UIViewAutolayoutConstraints", x.array(cons, "NSMutableArray"))
+    # A view whose position constraints decide stores the flag; one still
+    # sized by its autoresizing mask (fixedFrame) does not.
+    referenced = set()
+    for st in x.subtree.values():
+        cel = st["el"].find("constraints")
+        for c in (cel.findall("constraint") if cel is not None else ()):
+            referenced.update(filter(None, (c.get("firstItem"), c.get("secondItem"))))
+            referenced.add(st["el"].get("id"))
+    for idx, st in x.subtree.items():
+        el = st["el"]
+        if (el.get("translatesAutoresizingMaskIntoConstraints") == "NO"
+                and el.get("id") in referenced):
+            x.put(x.b.objects[idx], "UIViewDoesNotTranslateAutoresizingMaskIntoConstraints", YES)
+
+
+# ---------------------------------------------------------------- objects list
+
+def _guide_placeholder(x, cls):
+    g = x.new(cls)
+    x.put(g, "UILayoutGuideOwningView", (N.NIL, None))
+    x.put(g, "UILayoutGuideIdentifier", x.s(""))
+    x.put(g, "UILayoutGuideOwningViewIsLocked", NO)
+    x.put(g, "UILayoutGuideShouldBeArchived", NO)
+    x.put(g, "UILayoutGuideAllowsNegativeDimensions", NO)
+    if cls == "UIKeyboardLayoutGuide":
+        x.put(g, "UIKeyboardLayoutGuideFollowsUndocked", NO)
+    return g
+
+
+def _rest(x, o):
+    st = x.subtree.get(o.idx)
+    if st is None:
+        return []
+    out = []
+    # Apple lists a placeholder per guide, keyboard first.
+    for cls, _ in sorted(st["guides"], key=lambda g: g[0] != "UIKeyboardLayoutGuide"):
+        out.append(_guide_placeholder(x, cls))
+    out += st["cons"] + st["kids"]
+    for k in st["kids"]:
+        out += _rest(x, k)
+    return out
+
+
+# ---------------------------------------------------------------- connections
+
+EVENT_MASKS = {"touchUpInside": 64, "valueChanged": 4096, "editingChanged": 131072,
+               "touchDown": 1, "editingDidEnd": 262144, "editingDidBegin": 65536,
+               "primaryActionTriggered": 8192, "editingDidEndOnExit": 524288}
+
+
+def connections_pass(x, proxies):
+    outlets, events = [], []
+    for src, conns in x.connections:
+        for c in conns:
+            dst = c.get("destination")
+            if dst not in x.ids:
+                _fail(c, f"connection destination {dst}", x.where)
+            if c.tag == "outlet":
+                outlets.append(("UIRuntimeOutletConnection", c.get("property"), src, x.ids[dst]))
+            elif c.tag == "outletCollection":
+                _fail(c, "outlet collection", x.where)
+            elif c.tag == "action":
+                ev = c.get("eventType")
+                if ev is not None and ev not in EVENT_MASKS:
+                    _fail(c, f"eventType {ev}", x.where)
+                events.append((c.get("selector"), src, x.ids[dst], ev))
+            else:
+                _fail(c, "connection kind", x.where)
+    out = []
+    for cls, label, src, dst in outlets:
+        o = x.new(cls)
+        x.put(o, "UILabel", x.s(label))
+        x.put(o, "UISource", src)
+        x.put(o, "UIDestination", dst)
+        out.append(o)
+    for sel, src, dst, ev in events:
+        o = x.new("UIRuntimeEventConnection")
+        x.put(o, "UILabel", x.s(sel))
+        x.put(o, "UISource", src)
+        x.put(o, "UIDestination", dst)
+        if ev is not None:
+            x.put(o, "UIEventMask", x.b.int_fit(EVENT_MASKS[ev]))
+        out.append(o)
+    return out
+
+
+def pairs_pass(x):
+    out = []
+    for el, target in x.pairs:
+        try:
+            out += x.I._uda_build(x.b, el, target, x.resources, x.named)
+        except x.I.XibError as e:
+            raise Unsupported(str(e))
+    return out
+
+
+# ---------------------------------------------------------------- document
+
+def compile_xib(path, I):
+    doc = ET.parse(path).getroot()
+    if doc.get("targetRuntime") != "iOS.CocoaTouch":
+        raise Unsupported("not an iOS xib")
+    objects = doc.find("objects")
+    if objects is None:
+        raise Unsupported("no <objects>")
+    x = X(I, path, doc)
+    x.colors_ok = VIEW_COLORS
+    root = x.new("NSObject")
+    proxies = []
+    x.tops = [el for el in objects if el.tag != "placeholder"]
+    for el in objects:
+        if el.tag != "placeholder":
+            continue
+        extra = set(el.attrib) - {"placeholderIdentifier", "id", "userLabel", "customClass",
+                                  "customModule", "customModuleProvider"}
+        if extra or any(ch.tag != "connections" for ch in el):
+            _fail(el, "placeholder shape", x.where)
+        p = x.new("UIProxyObject")
+        x.put(p, "UIProxiedObjectIdentifier", x.s(el.get("placeholderIdentifier")))
+        x.ids[el.get("id")] = p
+        proxies.append(p)
+        if el.find("connections") is not None:
+            x.connections.append((p, el.find("connections")))
+    tops = [build(x, el) for el in x.tops]
+    constraints_pass(x)
+    conns = connections_pass(x, proxies)
+    pairs = pairs_pass(x)
+    listed = list(proxies)
+    for t in tops:
+        listed += [t] + _rest(x, t)
+    empty = x.array([])
+    x.put(root, "UINibTopLevelObjectsKey", x.array(proxies + tops))
+    x.put(root, "UINibObjectsKey", x.array(listed))
+    x.put(root, "UINibConnectionsKey", x.array(conns) if conns else empty)
+    x.put(root, "UINibVisibleWindowsKey", empty)
+    x.put(root, "UINibAccessibilityConfigurationsKey", empty)
+    x.put(root, "UINibTraitStorageListsKey", empty)
+    x.put(root, "UINibKeyValuePairsKey", x.array(pairs) if pairs else empty)
+    x.put(root, "IBUINibLNEVersionKey", x.b.int8(1))
+    for o in x.b.objects:
+        if not hasattr(o, "original_class"):
+            o.original_class = None
+    return finalize_dfs(I, x.b, root)
