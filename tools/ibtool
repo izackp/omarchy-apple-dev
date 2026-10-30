@@ -1356,6 +1356,10 @@ def finalize(b, root):
             v.key_idx = creation_idx[key]
             values.append(v)
         o.value_count = len(values) - o.value_start
+        if o.value_count == 0:
+            # An object with no values (UITapRecognizer, a default
+            # UICollectionViewFlowLayout) gets value index 0, not the running index.
+            o.value_start = 0
         if o.cls not in class_idx:
             class_idx[o.cls] = len(classes)
             classes.append([o.cls, ()])
