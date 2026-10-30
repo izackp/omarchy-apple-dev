@@ -163,6 +163,7 @@ class X:
         self.accessibility = []  # (target obj, label)
         self.subtree = {}     # obj idx -> (guide placeholders, constraints, kids)
         self.frames = {}      # element -> frame after resize_top
+        self.arranged = set()  # ids of stack views' arranged subviews
 
     def new(self, cls, orig=None):
         o = self.b.new(cls)
@@ -1225,6 +1226,40 @@ def table_view_cell(x, el):
     return o
 
 
+STACK_ATTRS = VIEW_ATTRS | {"axis", "distribution", "alignment", "spacing"}
+STACK_AXES = {"horizontal": 0, "vertical": 1}
+STACK_DISTRIBUTIONS = {"fill": 0, "fillEqually": 1, "fillProportionally": 2,
+                       "equalSpacing": 3, "equalCentering": 4}
+STACK_ALIGNMENTS = {"fill": 0, "leading": 1, "top": 1, "firstBaseline": 2, "center": 3,
+                    "trailing": 4, "bottom": 4, "lastBaseline": 5}
+
+
+def stack_view(x, el):
+    """<stackView>: every subview is arranged and does not translate its
+    autoresizing mask (VerificationCodeWidget golden)."""
+    check(x, el, STACK_ATTRS, VIEW_SUBS)
+    b = x.b
+    o = new_view_obj(x, el, "UIStackView")
+    view_keys(x, el, o, top=el in x.tops)
+    kids = x.subtree[o.idx]["kids"]
+    subs = el.find("subviews")
+    x.arranged.update(ch.get("id") for ch in (subs if subs is not None else ()))
+    x.put(o, "UIViewLayoutMargins", b.geom(0.0, 0.0, 0.0, 0.0))
+    x.put(o, "UIStackViewArrangedSubviews", x.array(kids))
+    for key, attr, table, default in (("UIStackViewAxis", "axis", STACK_AXES, "horizontal"),
+                                      ("UIStackViewDistribution", "distribution", STACK_DISTRIBUTIONS, "fill"),
+                                      ("UIStackViewAlignment", "alignment", STACK_ALIGNMENTS, "fill")):
+        v = el.get(attr, default)
+        if v not in table:
+            _fail(el, f"{attr} {v}", x.where)
+        x.put(o, key, b.int8(table[v]))
+    x.put(o, "UIStackViewSpacing", b.float64(float(el.get("spacing", "0"))))
+    x.put(o, "UIStackViewBaselineRelative", NO)
+    x.put(o, "UIStackViewLayoutMarginsRelative", NO)
+    finish_swap(x, o)
+    return o
+
+
 TABLE_ATTRS = SCROLL_ATTRS | {"style", "separatorStyle", "allowsSelection", "rowHeight",
                               "estimatedRowHeight", "sectionHeaderHeight",
                               "sectionFooterHeight", "contentViewInsetsToSafeArea"}
@@ -1263,7 +1298,7 @@ def table_view(x, el):
 
 
 BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
-            "tableView": table_view,
+            "tableView": table_view, "stackView": stack_view,
             "segmentedControl": segmented_control, "tableViewCell": table_view_cell,
             "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
@@ -1443,7 +1478,7 @@ def constraints_pass(x):
         x.put(o, "UIViewAutolayoutConstraints", x.array(cons, "NSMutableArray"))
     # A view whose position constraints decide stores the flag; one still
     # sized by its autoresizing mask (fixedFrame) does not.
-    referenced = set()
+    referenced = set(x.arranged)
     for st in x.subtree.values():
         cel = st["el"].find("constraints")
         for c in (cel.findall("constraint") if cel is not None else ()):
