@@ -162,6 +162,7 @@ class X:
         self.pairs = []       # (owner element, target obj, None for runtime attributes | (key path, rect))
         self.accessibility = []  # (target obj, label)
         self.subtree = {}     # obj idx -> (guide placeholders, constraints, kids)
+        self.frames = {}      # element -> frame after resize_top
 
     def new(self, cls, orig=None):
         o = self.b.new(cls)
@@ -350,10 +351,69 @@ def keyed_color(x, el, key):
 # ---------------------------------------------------------------- views
 
 def _frame(x, el):
+    if el in x.frames:
+        return x.frames[el]
     r = el.find("rect[@key='frame']")
     if r is None:
         return (0.0, 0.0, 1000.0, 1000.0)
     return tuple(float(r.get(k, "0")) for k in ("x", "y", "width", "height"))
+
+
+# Portrait screen sizes of the document's <device>. retina3_5 is no longer a
+# device Xcode 27 knows; it lays such a view out at 393x852 (PhotoDay
+# TableHeaderWidget golden).
+DEVICE_SIZES = {"retina3_5": (393, 852), "retina4_0": (320, 568), "retina4_7": (375, 667),
+                "retina5_5": (414, 736), "retina6_0": (390, 844), "retina6_1": (414, 896),
+                "retina6_12": (393, 852), "retina6_5": (414, 896), "retina6_72": (430, 932)}
+
+
+def _resize_axis(x, el, pos, size, old, new, flex_lo, flex_size, flex_hi):
+    """One axis of UIKit autoresizing. Shares of the change go to the flexible
+    parts in proportion to their sizes; a margin's share is rounded down
+    (PhotoDay TableWidget/TableHeaderWidget goldens: centered indicators)."""
+    delta = new - old
+    parts = [p for p, f in ((pos, flex_lo), (size, flex_size), (old - pos - size, flex_hi)) if f]
+    if not delta or not parts:
+        return pos, size
+    if flex_size and len(parts) == 1:
+        return pos, size + delta
+    if flex_lo and flex_hi and not flex_size:
+        total = pos + (old - pos - size)
+        return pos + (math.floor(delta * pos / total) if total else delta / 2), size
+    if flex_hi and len(parts) == 1:
+        return pos, size
+    if flex_lo and len(parts) == 1:
+        return pos + delta, size
+    _fail(el, "autoresizing with a flexible size and margin", x.where)
+
+
+def resize_top(x, el):
+    """Apple lays a top-level <view> without simulated metrics out at the
+    document device's screen size, autoresizing its subviews."""
+    dev = x.doc.find("device")
+    if el.tag != "view" or dev is None or el.find("freeformSimulatedSizeMetrics") is not None:
+        return
+    if dev.get("id") not in DEVICE_SIZES or dev.get("orientation", "portrait") != "portrait":
+        return
+    w, h = DEVICE_SIZES[dev.get("id")]
+    fx, fy, ow, oh = _frame(x, el)
+    if (ow, oh) == (w, h):
+        return
+    x.frames[el] = (fx, fy, float(w), float(h))
+
+    def walk(parent, old, new):
+        subs = parent.find("subviews")
+        for ch in (subs if subs is not None else ()):
+            if ch.get("translatesAutoresizingMaskIntoConstraints") == "NO" and not _bool(ch, "fixedFrame"):
+                _fail(ch, "auto layout under a view resized to the device", x.where)
+            m = _mask(x, ch, 0)
+            cx, cy, cw, ch_h = _frame(x, ch)
+            nx, nw = _resize_axis(x, ch, cx, cw, old[0], new[0], m & 1, m & 2, m & 4)
+            ny, nh = _resize_axis(x, ch, cy, ch_h, old[1], new[1], m & 8, m & 16, m & 32)
+            x.frames[ch] = (nx, ny, nw, nh)
+            if (nw, nh) != (cw, ch_h):
+                walk(ch, (cw, ch_h), (nw, nh))
+    walk(el, (ow, oh), (w, h))
 
 
 def _mask(x, el, default):
@@ -484,6 +544,9 @@ def view_keys(x, el, o, top, default_mask=36, opaque=True):
         x.put(o, "UIViewContentCompressionResistancePriority", x.s(
             f"{{{el.get('horizontalCompressionResistancePriority', '750')}, "
             f"{el.get('verticalCompressionResistancePriority', '750')}}}"))
+    if el.get("preservesSuperviewLayoutMargins") == "YES":
+        x.put(o, "UIViewPreservesSuperviewMargins", YES)
+        x.put(o, "UIViewPreservesSpecificSuperviewMargins", b.int8(15))
     if el.get("insetsLayoutMarginsFromSafeArea") == "NO":
         x.put(o, "UIViewInsetsLayoutMarginsFromSafeArea", b.int8(0))
     tint = keyed_color(x, el, "tintColor")
@@ -908,10 +971,15 @@ SCROLL_ATTRS = VIEW_ATTRS | {"showsHorizontalScrollIndicator", "showsVerticalScr
 
 def scroll_keys(x, el, o):
     b = x.b
-    for attr in ("pagingEnabled", "directionalLockEnabled", "alwaysBounceVertical",
-                 "alwaysBounceHorizontal", "keyboardDismissMode", "contentInsetAdjustmentBehavior"):
+    for attr in ("pagingEnabled", "directionalLockEnabled",
+                 "alwaysBounceHorizontal", "keyboardDismissMode"):
         if el.get(attr) is not None:
             _fail(el, f"scrollView {attr}", x.where)
+    insets = el.get("contentInsetAdjustmentBehavior", "automatic")
+    if insets not in CONTENT_INSET_ADJUSTMENT:
+        _fail(el, f"contentInsetAdjustmentBehavior {insets}", x.where)
+    if _bool(el, "alwaysBounceVertical"):
+        x.put(o, "UIAlwaysBounceVertical", YES)
     if el.get("showsHorizontalScrollIndicator") == "NO":
         x.put(o, "UIShowsHorizontalScrollIndicator", NO)
     if el.get("showsVerticalScrollIndicator") == "NO":
@@ -923,7 +991,10 @@ def scroll_keys(x, el, o):
     if el.get("bouncesZoom") != "NO":
         x.put(o, "UIBouncesZoom", YES)
     x.put(o, "UIScrollViewIndicatorInsetAdjustmentBehavior", b.int8(1))
-    x.put(o, "UIScrollViewContentInsetAdjustmentBehavior", b.int8(0))
+    x.put(o, "UIScrollViewContentInsetAdjustmentBehavior", b.int8(CONTENT_INSET_ADJUSTMENT[insets]))
+
+
+CONTENT_INSET_ADJUSTMENT = {"automatic": 0, "scrollableAxes": 1, "never": 2, "always": 3}
 
 
 def scroll_view(x, el):
@@ -1110,8 +1181,87 @@ def segmented_control(x, el):
     return o
 
 
+CELL_ATTRS = VIEW_ATTRS | {"selectionStyle", "indentationWidth", "reuseIdentifier"}
+CELL_SUBS = VIEW_SUBS | {"tableViewCellContentView"}
+CONTENT_VIEW_ATTRS = VIEW_ATTRS | {"tableViewCell"}
+
+
+def table_view_cell(x, el):
+    """<tableViewCell>: the content view plus a separator Apple synthesizes
+    (1pt, inset 8, at the bottom), which the objects list leaves out."""
+    check(x, el, CELL_ATTRS, CELL_SUBS)
+    if el.get("selectionStyle", "default") != "default":
+        _fail(el, f"selectionStyle {el.get('selectionStyle')}", x.where)
+    o = new_view_obj(x, el, "UITableViewCell")
+    view_keys(x, el, o, top=el in x.tops)
+    cv_el = el.find("tableViewCellContentView[@key='contentView']")
+    if cv_el is None:
+        _fail(el, "no contentView", x.where)
+    check(x, cv_el, CONTENT_VIEW_ATTRS, VIEW_SUBS)
+    cv = new_view_obj(x, cv_el, "UITableViewCellContentView")
+    view_keys(x, cv_el, cv, top=False)
+    _, _, w, h = _frame(x, el)
+    sep = x.new("_UITableViewCellSeparatorView")
+    x.put(sep, "UIBounds", x.b.geom(0.0, 0.0, w - 8.0, 1.0))
+    x.put(sep, "UICenter", x.b.geom(8.0 + (w - 8.0) / 2, h - 0.5))
+    for k in ("UIDeepDrawRect", "UIOpaque", "UIAutoresizeSubviews"):
+        x.put(sep, k, YES)
+    x.put(sep, "UIViewSemanticContentAttribute", x.b.int8(0))
+    x.put(sep, "UIViewLargeContentStoredProperties", (N.NIL, None))
+    x.put(o, "UISubviews", x.array([cv, sep], "NSMutableArray"))
+    x.subtree[o.idx]["kids"] = [cv]
+    if el.get("reuseIdentifier"):
+        x.put(o, "UIReuseIdentifier", x.s(el.get("reuseIdentifier")))
+    x.put(o, "UIIndentationWidth", x.b.float32(float(el.get("indentationWidth", "10"))))
+    x.put(o, "UISystemBackgroundView", (N.NIL, None))
+    x.put(o, "UIContentConfigurationView", (N.NIL, None))
+    x.put(o, "UIContentView", cv)
+    for k in ("UITextLabel", "UIDetailTextLabel", "UIImageView"):
+        x.put(o, k, (N.NIL, None))
+    finish_swap(x, o)
+    return o
+
+
+TABLE_ATTRS = SCROLL_ATTRS | {"style", "separatorStyle", "allowsSelection", "rowHeight",
+                              "estimatedRowHeight", "sectionHeaderHeight",
+                              "sectionFooterHeight", "contentViewInsetsToSafeArea"}
+
+
+def table_view(x, el):
+    """<tableView> with no cells of its own (the PhotoDay widgets register
+    their cells in code)."""
+    check(x, el, TABLE_ATTRS, VIEW_SUBS - {"subviews"})
+    for attr, ok in (("style", "plain"), ("separatorStyle", "none")):
+        if el.get(attr) != ok:
+            _fail(el, f"{attr} {el.get(attr)}", x.where)
+    b = x.b
+    o = new_view_obj(x, el, "UITableView")
+    view_keys(x, el, o, top=el in x.tops)
+    scroll_keys(x, el, o)
+    x.put(o, "UITableViewStyle", b.int8(0))
+    x.put(o, "UIStyle", b.int8(0))
+    x.put(o, "UISeparatorStyleIOS9AndLater", b.int8(0))
+    x.put(o, "UIPrefetchingEnabled", YES)
+    for key, attr, default in (("UIRowHeight", "rowHeight", "-1"),
+                               ("UISectionHeaderHeight", "sectionHeaderHeight", "-1"),
+                               ("UISectionFooterHeight", "sectionFooterHeight", "-1"),
+                               ("UIEstimatedRowHeight", "estimatedRowHeight", "-1")):
+        x.put(o, key, b.float32(float(el.get(attr, default))))
+    x.put(o, "UIEstimatedSectionHeaderHeight", b.float32(0.0))
+    x.put(o, "UIEstimatedSectionFooterHeight", b.float32(0.0))
+    x.put(o, "UIFillerRowHeight", b.float64(0.0))
+    x.put(o, "UISectionHeaderTopPadding", b.float64(-1.0))
+    x.put(o, "UIAllowsSelection", NO if el.get("allowsSelection") == "NO" else YES)
+    x.put(o, "UIInsetsContentViewsToSafeArea",
+          NO if el.get("contentViewInsetsToSafeArea") == "NO" else YES)
+    x.put(o, "UISeparatorInsetReference", b.int8(0))
+    finish_swap(x, o)
+    return o
+
+
 BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
-            "segmentedControl": segmented_control,
+            "tableView": table_view,
+            "segmentedControl": segmented_control, "tableViewCell": table_view_cell,
             "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
 
@@ -1491,6 +1641,8 @@ def compile_xib(path, I):
         proxies.append(p)
         if el.find("connections") is not None:
             x.connections.append((p, el.find("connections")))
+    for el in x.tops:
+        resize_top(x, el)
     tops = [build(x, el) for el in x.tops]
     constraints_pass(x)
     conns = connections_pass(x, proxies)
