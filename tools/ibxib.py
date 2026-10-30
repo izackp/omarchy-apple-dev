@@ -1338,6 +1338,73 @@ def visual_effect_view(x, el):
     return o
 
 
+COLLECTION_ATTRS = SCROLL_ATTRS | {"dataMode"}
+FLOW_LAYOUT_ATTRS = {"key", "id", "minimumLineSpacing", "minimumInteritemSpacing"}
+# Interface Builder's defaults; Apple stores a flow layout's value only when it
+# differs (CollectionViewWidget golden: an empty UICollectionViewFlowLayout).
+FLOW_LAYOUT_DEFAULTS = {"itemSize": {"width": "50", "height": "50"},
+                        "headerReferenceSize": {"width": "0.0", "height": "0.0"},
+                        "footerReferenceSize": {"width": "0.0", "height": "0.0"},
+                        "sectionInset": {"minX": "0.0", "minY": "0.0", "maxX": "0.0", "maxY": "0.0"}}
+
+
+def _collection_layout(x, el):
+    flow = el.find("collectionViewFlowLayout[@key='collectionViewLayout']")
+    custom = el.find("collectionViewLayout[@key='collectionViewLayout']")
+    if custom is not None:
+        if set(custom.attrib) - {"key", "id", "customClass", "customModule", "customModuleProvider"} \
+                or len(custom) or not custom.get("customClass"):
+            _fail(custom, "collection view layout shape", x.where)
+        lo = new_view_obj(x, custom, "UICollectionViewLayout")
+        finish_swap(x, lo)
+        return lo
+    if flow is None:
+        _fail(el, "collection view without a layout", x.where)
+    if set(flow.attrib) - FLOW_LAYOUT_ATTRS:
+        _fail(flow, f"flow layout attributes {sorted(set(flow.attrib) - FLOW_LAYOUT_ATTRS)}", x.where)
+    for ch in flow:
+        default = FLOW_LAYOUT_DEFAULTS.get(ch.get("key"))
+        if default is None or {k: v for k, v in ch.attrib.items() if k != "key"} != default:
+            _fail(flow, f"flow layout {ch.get('key')} {dict(ch.attrib)}", x.where)
+    lo = new_view_obj(x, flow, "UICollectionViewFlowLayout")
+    for key, attr in (("UIInteritemSpacing", "minimumInteritemSpacing"),
+                      ("UILineSpacing", "minimumLineSpacing")):
+        v = float(flow.get(attr, "10"))
+        if v != 10.0:
+            x.put(lo, key, x.b.float32(v))
+    finish_swap(x, lo)
+    return lo
+
+
+def collection_view(x, el):
+    """<collectionView dataMode="none">: cells are registered in code."""
+    check(x, el, COLLECTION_ATTRS, VIEW_SUBS - {"subviews"} | {"collectionViewFlowLayout",
+                                                                "collectionViewLayout"})
+    if el.get("dataMode") != "none":
+        _fail(el, f"dataMode {el.get('dataMode')}", x.where)
+    o = new_view_obj(x, el, "UICollectionView")
+    view_keys(x, el, o, top=el in x.tops)
+    scroll_keys(x, el, o)
+    # Opaque white, a collection view's default background in Interface
+    # Builder, keeps the default's name (CollectionViewWidget, VCJobList goldens).
+    white = x.s("whiteColor").values
+    for k, v in o.values:
+        if k != "UIBackgroundColor":
+            continue
+        bg = x.b.objects[v.payload]
+        for n, (ck, cv) in enumerate(bg.values):
+            if ck == "UISystemColorName" and x.b.objects[cv.payload].values == white:
+                bg.values[n] = (ck, N.Value(0, N.OBJREF, x.s("systemBackgroundColor").idx))
+    lo = _collection_layout(x, el)
+    # The layout follows the view in the objects list, as its child.
+    x.subtree[o.idx]["kids"] = [lo]
+    x.put(o, "UICollectionLayout", lo)
+    x.put(o, "UIAllowsUserInitiatedMultipleSelection", YES)
+    x.put(o, "UICollectionViewPrefetchingEnabled", YES)
+    finish_swap(x, o)
+    return o
+
+
 TABLE_ATTRS = SCROLL_ATTRS | {"style", "separatorStyle", "allowsSelection", "rowHeight",
                               "estimatedRowHeight", "sectionHeaderHeight",
                               "sectionFooterHeight", "contentViewInsetsToSafeArea"}
@@ -1378,6 +1445,7 @@ def table_view(x, el):
 BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
             "tableView": table_view, "stackView": stack_view,
             "visualEffectView": visual_effect_view, "textView": text_view,
+            "collectionView": collection_view,
             "segmentedControl": segmented_control, "tableViewCell": table_view_cell,
             "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
