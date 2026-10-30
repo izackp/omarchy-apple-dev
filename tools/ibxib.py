@@ -47,6 +47,14 @@ class Unsupported(Exception):
     pass
 
 
+def int_fit(v):
+    """The narrowest integer value type holding v, as Apple's encoder picks."""
+    for t, bits in ((N.INT8, 8), (N.INT16, 16), (N.INT32, 32)):
+        if -(1 << (bits - 1)) <= v < (1 << (bits - 1)):
+            return (t, v)
+    return (N.INT64, v)
+
+
 def _f32(v):
     return struct.unpack("<f", struct.pack("<f", v))[0]
 
@@ -311,6 +319,9 @@ def _mask(x, el, default):
 CONTENT_MODES = {"scaleToFill": 0, "scaleAspectFit": 1, "scaleAspectFill": 2, "redraw": 3,
                  "center": 4, "top": 5, "bottom": 6, "left": 7, "right": 8, "topLeft": 9,
                  "topRight": 10, "bottomLeft": 11, "bottomRight": 12}
+# Classes whose hugging priority defaults to 750: Apple stores the priority
+# only when it differs from the class default.
+INTRINSIC_HUGGING = {"UISwitch": "750", "UIActivityIndicatorView": "750"}
 VIEW_ATTRS = {"id", "key", "contentMode", "opaque", "clipsSubviews", "hidden", "alpha",
               "userInteractionEnabled", "clearsContextBeforeDrawing", "multipleTouchEnabled",
               "translatesAutoresizingMaskIntoConstraints", "customClass", "customModule",
@@ -323,7 +334,8 @@ VIEW_ATTRS = {"id", "key", "contentMode", "opaque", "clipsSubviews", "hidden", "
 VIEW_SUBS = {"rect", "autoresizingMask", "subviews", "constraints", "color",
              "viewLayoutGuide", "keyboardLayoutGuide", "userDefinedRuntimeAttributes",
              "connections", "point", "freeformSimulatedSizeMetrics", "nil"}
-VIEW_COLORS = {"backgroundColor", "tintColor", "textColor", "highlightedColor", "shadowColor"}
+VIEW_COLORS = {"backgroundColor", "tintColor", "textColor", "highlightedColor", "shadowColor",
+               "color"}
 
 
 def _custom_class(x, el):
@@ -390,6 +402,8 @@ def view_keys(x, el, o, top, default_mask=36):
         x.put(o, "UIHidden", YES)
     if el.get("userInteractionEnabled") == "NO":
         x.put(o, "UIUserInteractionDisabled", YES)
+    if _bool(el, "multipleTouchEnabled"):
+        x.put(o, "UIMultipleTouchEnabled", YES)
     x.put(o, "UIAutoresizeSubviews", YES)
     mask = _mask(x, el, 18 if top else default_mask)
     if mask:
@@ -405,10 +419,10 @@ def view_keys(x, el, o, top, default_mask=36):
         _fail(el, f"contentMode {mode}", x.where)
     if mode != "scaleToFill":
         x.put(o, "UIContentMode", b.int8(CONTENT_MODES[mode]))
-    if el.get("horizontalHuggingPriority") or el.get("verticalHuggingPriority"):
-        x.put(o, "UIViewContentHuggingPriority", x.s(
-            f"{{{el.get('horizontalHuggingPriority', '250')}, "
-            f"{el.get('verticalHuggingPriority', '250')}}}"))
+    hug_default = INTRINSIC_HUGGING.get(o.original_class or o.cls, "250")
+    hug = (el.get("horizontalHuggingPriority", "250"), el.get("verticalHuggingPriority", "250"))
+    if hug != (hug_default, hug_default):
+        x.put(o, "UIViewContentHuggingPriority", x.s(f"{{{hug[0]}, {hug[1]}}}"))
     if (el.get("horizontalCompressionResistancePriority")
             or el.get("verticalCompressionResistancePriority")):
         x.put(o, "UIViewContentCompressionResistancePriority", x.s(
@@ -542,7 +556,7 @@ def label(x, el):
             x.put(o, "UIMinimumScaleFactor", b.float32(float(mfs) / float(ps)))
     nol = el.get("numberOfLines", "1")
     if nol != "1":
-        x.put(o, "UINumberOfLines", b.int_fit(int(nol)))
+        x.put(o, "UINumberOfLines", int_fit(int(nol)))
     lbm = el.get("lineBreakMode", "tailTruncation")
     if lbm != "tailTruncation":
         x.put(o, "UILineBreakMode", b.int8(x.I.LINE_BREAK_MODES[lbm]))
@@ -722,7 +736,174 @@ def button(x, el):
     return o
 
 
-BUILDERS = {"view": view, "label": label, "button": button, "imageView": image_view}
+SCROLL_ATTRS = VIEW_ATTRS | {"showsHorizontalScrollIndicator", "showsVerticalScrollIndicator",
+                             "bouncesZoom", "bounces", "alwaysBounceVertical",
+                             "alwaysBounceHorizontal", "pagingEnabled", "scrollEnabled",
+                             "keyboardDismissMode", "directionalLockEnabled",
+                             "contentInsetAdjustmentBehavior"}
+
+
+def scroll_keys(x, el, o):
+    b = x.b
+    for attr in ("pagingEnabled", "directionalLockEnabled", "alwaysBounceVertical",
+                 "alwaysBounceHorizontal", "keyboardDismissMode", "contentInsetAdjustmentBehavior"):
+        if el.get(attr) is not None:
+            _fail(el, f"scrollView {attr}", x.where)
+    if el.get("showsHorizontalScrollIndicator") == "NO":
+        x.put(o, "UIShowsHorizontalScrollIndicator", NO)
+    if el.get("showsVerticalScrollIndicator") == "NO":
+        x.put(o, "UIShowsVerticalScrollIndicator", NO)
+    if el.get("bounces") == "NO":
+        x.put(o, "UIBounces", NO)
+    if el.get("scrollEnabled") == "NO":
+        x.put(o, "UIScrollDisabled", YES)
+    if el.get("bouncesZoom") != "NO":
+        x.put(o, "UIBouncesZoom", YES)
+    x.put(o, "UIScrollViewIndicatorInsetAdjustmentBehavior", b.int8(1))
+    x.put(o, "UIScrollViewContentInsetAdjustmentBehavior", b.int8(0))
+
+
+def scroll_view(x, el):
+    check(x, el, SCROLL_ATTRS, VIEW_SUBS)
+    o = new_view_obj(x, el, "UIScrollView")
+    view_keys(x, el, o, top=el in x.tops)
+    scroll_keys(x, el, o)
+    finish_swap(x, o)
+    return o
+
+
+TRAIT_ENUMS = {
+    "autocapitalizationType": ("UIAutocapitalizationType",
+                               {"none": 0, "words": 1, "sentences": 2, "allCharacters": 3}),
+    "autocorrectionType": ("UIAutocorrectionType", {"default": 0, "no": 1, "yes": 2}),
+    "spellCheckingType": ("UISpellCheckingType", {"default": 0, "no": 1, "yes": 2}),
+    "smartQuotesType": ("UITextSmartQuotesType", {"default": 0, "no": 1, "yes": 2}),
+    "smartDashesType": ("UITextSmartDashesType", {"default": 0, "no": 1, "yes": 2}),
+    "smartInsertDeleteType": ("UITextSmartInsertDeleteType", {"default": 0, "no": 1, "yes": 2}),
+    "keyboardType": ("UIKeyboardType", {"default": 0, "alphabet": 1, "asciiCapable": 1,
+                                        "numbersAndPunctuation": 2, "URL": 3, "numberPad": 4,
+                                        "phonePad": 5, "namePhonePad": 6, "emailAddress": 7,
+                                        "decimalPad": 8, "twitter": 9, "webSearch": 10,
+                                        "asciiCapableNumberPad": 11}),
+    "returnKeyType": ("UIReturnKeyType", {"default": 0, "go": 1, "google": 2, "join": 3,
+                                          "next": 4, "route": 5, "search": 6, "send": 7,
+                                          "yahoo": 8, "done": 9, "emergencyCall": 10,
+                                          "continue": 11}),
+}
+
+
+def text_input_traits(x, el, o):
+    t = el.find("textInputTraits[@key='textInputTraits']")
+    if t is None:
+        return
+    for k, v in t.attrib.items():
+        if k == "key":
+            continue
+        if k in TRAIT_ENUMS:
+            key, table = TRAIT_ENUMS[k]
+            x.put(o, key, x.b.int8(table[v]))
+        elif k == "textContentType":
+            x.put(o, "UITextContentType", x.s(v))
+        elif k == "secureTextEntry" and v == "YES":
+            x.put(o, "UISecureTextEntry", YES)
+            # a secure field turns inline predictions off
+            x.put(o, "UITextInlinePredictionType", x.b.int8(1))
+        else:
+            _fail(t, f"text input trait {k}={v}", x.where)
+
+
+TEXT_FIELD_ATTRS = VIEW_ATTRS | CONTROL_ATTRS | {
+    "text", "placeholder", "textAlignment", "minimumFontSize", "clearButtonMode",
+    "adjustsFontSizeToFit", "borderStyle", "clearsOnBeginEditing",
+    "adjustsFontForContentSizeCategory"}
+TEXT_FIELD_SUBS = VIEW_SUBS | {"fontDescription", "textInputTraits"}
+CLEAR_BUTTON_MODES = {"never": 0, "whileEditing": 1, "unlessEditing": 2, "always": 3}
+
+
+def text_field(x, el):
+    check(x, el, TEXT_FIELD_ATTRS, TEXT_FIELD_SUBS)
+    for a in ("borderStyle", "clearsOnBeginEditing", "adjustsFontForContentSizeCategory"):
+        if el.get(a) is not None:
+            _fail(el, f"textField {a}", x.where)
+    b = x.b
+    o = new_view_obj(x, el, "UITextField")
+    view_keys(x, el, o, top=el in x.tops)
+    control_keys(x, el, o)
+    if el.get("text") is not None:
+        x.put(o, "UIText", x.s(el.get("text")))
+    if el.get("placeholder") is not None:
+        x.put(o, "UIPlaceholder", x.s(el.get("placeholder")))
+    x.put(o, "UIFont", font(x, el.find("fontDescription")) or system_font(x, 14.0))
+    tc = keyed_color(x, el, "textColor")
+    if tc is None:
+        _fail(el, "textField without textColor", x.where)
+    x.put(o, "UITextColor", tc)
+    x.put(o, "UITextAlignment", b.int8(x.I.TEXT_ALIGNMENTS[el.get("textAlignment", "left")]))
+    if el.get("adjustsFontSizeToFit") != "NO":
+        x.put(o, "UIAdjustsFontSizeToFit", YES)
+    x.put(o, "UIMinimumFontSize", b.float32(float(el.get("minimumFontSize", "0"))))
+    x.put(o, "UIClearButtonOffset", b.geom(3.0, 1.0))
+    if el.get("clearButtonMode") is not None:
+        x.put(o, "UIClearButtonMode", b.int8(CLEAR_BUTTON_MODES[el.get("clearButtonMode")]))
+    x.put(o, "UIDisableTextColorUpdateOnTraitCollectionChange", YES)
+    text_input_traits(x, el, o)
+    finish_swap(x, o)
+    return o
+
+
+SWITCH_ATTRS = VIEW_ATTRS | CONTROL_ATTRS | {"on"}
+SWITCH_SUBS = VIEW_SUBS
+
+
+def switch(x, el):
+    check(x, el, SWITCH_ATTRS, SWITCH_SUBS)
+    if el.find("color[@key='onTintColor']") is not None or el.find("color[@key='thumbTintColor']") is not None:
+        _fail(el, "switch tint colors", x.where)
+    o = new_view_obj(x, el, "UISwitch")
+    view_keys(x, el, o, top=el in x.tops)
+    control_keys(x, el, o)
+    x.put(o, "UISwitchEnabled", YES)
+    if _bool(el, "on"):
+        x.put(o, "UISwitchOn", YES)
+    # UISwitch resets its frame to its intrinsic size when decoded, so Apple
+    # restores the document frame with a key-value pair.
+    fx, fy, w, h = _frame(x, el)
+    x.pairs.append((("frame", f"{{{{{fx:g}, {fy:g}}}, {{{w:g}, {h:g}}}}}"), o))
+    finish_swap(x, o)
+    return o
+
+
+# style -> (UIActivityIndicatorViewStyle-Modern, UIActivityIndicatorViewStyle)
+ACTIVITY_STYLES = {"whiteLarge": (0, 0), "medium": (100, 1)}
+ACTIVITY_ATTRS = VIEW_ATTRS | {"style", "animating", "hidesWhenStopped"}
+
+
+def activity_indicator(x, el):
+    check(x, el, ACTIVITY_ATTRS, VIEW_SUBS)
+    if el.get("hidesWhenStopped") == "NO" or el.get("style") not in ACTIVITY_STYLES:
+        _fail(el, "activityIndicatorView style", x.where)
+    o = new_view_obj(x, el, "UIActivityIndicatorView")
+    view_keys(x, el, o, top=el in x.tops)
+    modern, legacy = ACTIVITY_STYLES[el.get("style")]
+    x.put(o, "UIActivityIndicatorViewStyle-Modern", x.b.int8(modern))
+    x.put(o, "UIActivityIndicatorViewStyle", x.b.int8(legacy))
+    c = keyed_color(x, el, "color")
+    if c is not None:
+        x.put(o, "UIColor", c)
+        x.put(o, "UITintColor", c)
+        x.put(o, "UIDisableUpdateColorOnTraitCollectionChange", YES)
+    elif el.get("style") == "whiteLarge":
+        x.put(o, "UIColor", (N.NIL, None))
+    else:
+        _fail(el, "activityIndicatorView default color", x.where)
+    if _bool(el, "animating"):
+        x.put(o, "UIAnimating", YES)
+    finish_swap(x, o)
+    return o
+
+
+BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
+            "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
 
 def build(x, el):
@@ -767,7 +948,7 @@ def _constraint(x, c, owner_el, owner):
         x.put(o, "NSSecondAttributeV2", b.int8(_attr_code(I, sa)))
         x.put(o, "NSSecondAttribute", b.int8(I.ATTRIBUTES.get(I.MARGIN_BASE.get(sa, sa), 0)))
     if c.get("priority") is not None:
-        x.put(o, "NSPriority", b.int_fit(int(float(c.get("priority")))))
+        x.put(o, "NSPriority", int_fit(int(float(c.get("priority")))))
 
     def margin(a):
         return 8.0 if a in ("leadingMargin", "topMargin") else \
@@ -821,6 +1002,53 @@ def _guides(x, el, o):
             _fail(g, f"layout guide {g.get('key')}", x.where)
 
 
+OWNER_ORDER = ("width", "height", "centerX", "centerY", "trailing", "leading", "bottom", "top")
+OTHER_ORDER = ("centerX", "trailing", "leading", "centerY", "bottom", "top", "width", "height")
+RELATION_ORDER = {"lessThanOrEqual": 0, "greaterThanOrEqual": 1, "equal": 2}
+
+
+def constraint_order(I, view_el, cons):
+    """Apple's order of a view's constraints (tools/ibtool._constraint_order,
+    extended on the PhotoDay corpus)."""
+    owner = view_el.get("id")
+    par = I._constraint_order_parents(view_el, owner)
+    guides, index, origin = I._constraint_order_frames(view_el)
+    guides = guides + [g.get("id") for g in view_el.findall("keyboardLayoutGuide")]
+
+    def key(c):
+        first, second = c.get("firstItem", owner), c.get("secondItem")
+        fa, sa = c.get("firstAttribute"), c.get("secondAttribute")
+        rel = RELATION_ORDER[c.get("relation", "equal")]
+        if first == owner and second is None:
+            # the view's own size constraints come first
+            return (0, 0.0, 0.0, 1, OTHER_ORDER.index(fa), 0, 0)
+        guide_item = first in guides and second is not None and second not in guides \
+            and second != owner
+        try:
+            item, attr, other, oattr, gkey = I._constraint_order_placement(
+                c, first, second, fa, sa, guide_item, owner, guides, index, origin, par,
+                "x", False)
+        except I.XibError as e:
+            raise Unsupported(str(e))
+        if other == owner:
+            if attr not in OWNER_ORDER:
+                raise Unsupported(f"constraint {c.get('id')}: {attr}/{oattr} to the owner view")
+            return gkey + (0, OWNER_ORDER.index(attr), 0, 0)
+        if attr not in OTHER_ORDER or (oattr is not None and oattr not in OTHER_ORDER):
+            raise Unsupported(f"constraint {c.get('id')}: attribute {attr}/{oattr}")
+        other_idx = 0 if guide_item else index.get(other, -1)
+        return gkey + (1, OTHER_ORDER.index(attr), rel, other_idx)
+
+    # Groups at the same frame origin tie; Apple then orders them by the item's
+    # document id, as strings (VCTermsModal: 1zG before Qcb, c9Q before pWd).
+    def key2(c):
+        k = key(c)
+        first, second = c.get("firstItem", owner), c.get("secondItem")
+        item = second if first == owner and second is not None else first
+        return k[:3] + (item or "",) + k[3:]
+    return sorted(cons, key=key2)
+
+
 def constraints_pass(x):
     """After every view exists: guides, then each view's constraints in Apple's order."""
     for idx, st in list(x.subtree.items()):
@@ -834,10 +1062,7 @@ def constraints_pass(x):
         cel = el.find("constraints")
         if cel is None:
             continue
-        try:
-            ordered = x.I._constraint_order(el, cel.findall("constraint"), x.where)
-        except x.I.XibError as e:
-            raise Unsupported(str(e))
+        ordered = constraint_order(x.I, el, cel.findall("constraint"))
         cons = [_constraint(x, c, el, o) for c in ordered]
         st["cons"] = cons
         x.put(o, "UIViewAutolayoutConstraints", x.array(cons, "NSMutableArray"))
@@ -909,6 +1134,9 @@ def connections_pass(x, proxies):
                 events.append((c.get("selector"), src, x.ids[dst], ev))
             else:
                 _fail(c, "connection kind", x.where)
+    # Apple sorts outlets by property name, then actions by selector.
+    outlets.sort(key=lambda t: t[1])
+    events.sort(key=lambda t: t[0])
     out = []
     for cls, label, src, dst in outlets:
         o = x.new(cls)
@@ -922,7 +1150,7 @@ def connections_pass(x, proxies):
         x.put(o, "UISource", src)
         x.put(o, "UIDestination", dst)
         if ev is not None:
-            x.put(o, "UIEventMask", x.b.int_fit(EVENT_MASKS[ev]))
+            x.put(o, "UIEventMask", int_fit(EVENT_MASKS[ev]))
         out.append(o)
     return out
 
@@ -930,6 +1158,14 @@ def connections_pass(x, proxies):
 def pairs_pass(x):
     out = []
     for el, target in x.pairs:
+        if isinstance(el, tuple):
+            key_path, rect = el
+            p = x.new("UINibKeyValuePair")
+            x.put(p, "UIObject", target)
+            x.put(p, "UIValue", x.b.nsvalue_rect(rect))
+            x.put(p, "UIKeyPath", x.s(key_path))
+            out.append(p)
+            continue
         try:
             out += x.I._uda_build(x.b, el, target, x.resources, x.named)
         except x.I.XibError as e:
