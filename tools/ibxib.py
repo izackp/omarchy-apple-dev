@@ -264,6 +264,38 @@ def generic_to_srgb(rgb):
     return [_encode_srgb(sum(_GEN_TO_SRGB[r][k] * lin[k] for k in range(3))) for r in range(3)]
 
 
+# Display P3: its profile's primaries, sRGB's curve.
+_DISPLAY_P3 = ((0.5151214599609375, 0.2919769287109375, 0.1571044921875),
+               (0.2411956787109375, 0.6922454833984375, 0.0665740966796875),
+               (-0.0010528564453125, 0.0418853759765625, 0.7840728759765625))
+_P3_TO_SRGB = (lambda a, b: tuple(tuple(sum(a[r][k] * b[k][c] for k in range(3))
+                                        for c in range(3)) for r in range(3)))(
+    _inv3(_white_scaled(_SRGB)), _white_scaled(_DISPLAY_P3))
+
+
+def _decode_srgb(v):
+    a = abs(_f32(v))
+    out = a / 12.92 if a <= 0.04045 else ((a + 0.055) / 1.055) ** 2.4
+    return -out if v < 0 else out
+
+
+def p3_to_srgb(rgb):
+    """Display P3 -> extended sRGB, as float32 (within ~1e-7 of ColorSync)."""
+    lin = [_decode_srgb(v) for v in rgb]
+    return [_f32(_encode_srgb(sum(_P3_TO_SRGB[r][k] * lin[k] for k in range(3)))) for r in range(3)]
+
+
+def to_srgb(space, rgb):
+    """RGB components in a document color space -> sRGB, or None if unknown."""
+    if space == "sRGB":
+        return list(rgb)
+    if space == "calibratedRGB":
+        return [_f32(v) for v in generic_to_srgb(rgb)]
+    if space == "displayP3":
+        return p3_to_srgb(rgb)
+    return None
+
+
 def _white_components(x, c, w, al):
     x.put(c, "UIColorComponentCount", x.b.int8(2))
     for k, v in (("UIWhite", w), ("UIAlpha", al)):
@@ -1134,9 +1166,10 @@ def connections_pass(x, proxies):
                 events.append((c.get("selector"), src, x.ids[dst], ev))
             else:
                 _fail(c, "connection kind", x.where)
-    # Apple sorts outlets by property name, then actions by selector.
+    # Apple sorts outlets by property name, then actions by event mask (none
+    # first) and selector.
     outlets.sort(key=lambda t: t[1])
-    events.sort(key=lambda t: t[0])
+    events.sort(key=lambda t: (EVENT_MASKS.get(t[3], 0), t[0]))
     out = []
     for cls, label, src, dst in outlets:
         o = x.new(cls)

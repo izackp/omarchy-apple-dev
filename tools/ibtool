@@ -47,6 +47,12 @@ SYSTEM_COLORS = {  # name -> built-in spec, preferred over document resources
     "labelColor": ("white", 0.0, 1.0),
     # not in document resources (gold Inspector tableView background)
     "systemGroupedBackgroundColor": ("rgba", 0.9490196078, 0.9490196078, 0.9686274510, 1.0),
+    # Xcode 27's palette replaces the document's own values (PhotoDay goldens:
+    # documents saved by older Xcodes carry systemBlue green 0.478, red's 59/48)
+    "systemBlueColor": ("rgba", 0.0, 136 / 255, 1.0, 1.0),
+    "tintColor": ("rgba", 0.0, 136 / 255, 1.0, 1.0),
+    "systemRedColor": ("rgba", 1.0, 56 / 255, 60 / 255, 1.0),
+    "secondarySystemFillColor": ("rgba", 120 / 255, 120 / 255, 128 / 255, 0.16),
 }
 
 FONT_STYLES = {  # UICTFontTextStyle -> (font name, UIFontTraits, NSSize) at deployment
@@ -1169,10 +1175,20 @@ def _parse_color_spec(sc, path):
     if col is None:
         raise XibError(f"{path}: resource {sc.get('name')!r} has no color")
     try:
-        return ("rgba", float(col.get("red")), float(col.get("green")),
-                float(col.get("blue")), float(col.get("alpha")))
+        rgb = [float(col.get(k)) for k in ("red", "green", "blue")]
+        alpha = float(col.get("alpha"))
     except (TypeError, ValueError):
         pass
+    else:
+        space = col.get("customColorSpace") if col.get("colorSpace") == "custom" else col.get("colorSpace")
+        if space not in (None, "sRGB"):
+            # Apple stores other spaces converted to extended sRGB (PhotoDay
+            # VCQuestion golden: a displayP3 AccentColor).
+            import ibxib
+            rgb = ibxib.to_srgb(space, rgb)
+            if rgb is None:
+                raise XibError(f"{path}: resource {sc.get('name')!r} in color space {space!r}")
+        return ("rgba", *rgb, alpha)
     try:
         return ("white", float(col.get("white")), float(col.get("alpha")))
     except (TypeError, ValueError):
