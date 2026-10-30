@@ -1242,16 +1242,19 @@ def _guide_placeholder(x, cls):
 
 
 def _rest(x, o):
-    st = x.subtree.get(o.idx)
-    if st is None:
-        return []
+    """Everything under a top-level object, breadth first: as each view is
+    reached, its guide placeholders (keyboard first), constraints and subviews
+    (VCPickSubjectsGroup golden)."""
     out = []
-    # Apple lists a placeholder per guide, keyboard first.
-    for cls, _ in sorted(st["guides"], key=lambda g: g[0] != "UIKeyboardLayoutGuide"):
-        out.append(_guide_placeholder(x, cls))
-    out += st["cons"] + st["kids"]
-    for k in st["kids"]:
-        out += _rest(x, k)
+    queue = [o]
+    while queue:
+        st = x.subtree.get(queue.pop(0).idx)
+        if st is None:
+            continue
+        for cls, _ in sorted(st["guides"], key=lambda g: g[0] != "UIKeyboardLayoutGuide"):
+            out.append(_guide_placeholder(x, cls))
+        out += st["cons"] + st["kids"]
+        queue += st["kids"]
     return out
 
 
