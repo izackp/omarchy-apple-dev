@@ -53,6 +53,8 @@ SYSTEM_COLORS = {  # name -> built-in spec, preferred over document resources
     "tintColor": ("rgba", 0.0, 136 / 255, 1.0, 1.0),
     "systemRedColor": ("rgba", 1.0, 56 / 255, 60 / 255, 1.0),
     "secondarySystemFillColor": ("rgba", 120 / 255, 120 / 255, 128 / 255, 0.16),
+    # implied (a medium activity indicator's tint), so not always in the document
+    "secondaryLabelColor": ("rgba", 60 / 255, 60 / 255, 67 / 255, 0.6),
 }
 
 FONT_STYLES = {  # UICTFontTextStyle -> (font name, UIFontTraits, NSSize) at deployment

@@ -21,6 +21,7 @@ compile_xib() raises Unsupported for anything it does not know; tools/ibtool
 then falls back to its older compiler.
 """
 import json
+import math
 import os
 import struct
 import xml.etree.ElementTree as ET
@@ -197,7 +198,7 @@ def color(x, el):
         w, al = float(a["white"]), float(a.get("alpha", "1"))
         if space in ("genericGamma22GrayColorSpace", "calibratedWhite"):
             if space == "calibratedWhite" and (w, al) not in ((1.0, 1.0), (0.0, 0.0), (0.0, 1.0)):
-                return _white_components(x, x.new("UIColor"), _encode_srgb(_generic_gamma(w)), al)
+                return _white_components(x, x.new("UIColor"), _f32(_encode_srgb(_generic_gamma(w))), al)
             name = {(1.0, 1.0): "whiteColor", (0.0, 0.0): "clearColor",
                     (0.0, 1.0): "blackColor"}.get((w, al))
             if name:
@@ -580,7 +581,9 @@ def label(x, el):
         msf = el.get("minimumScaleFactor")
         mfs = el.get("minimumFontSize")
         if mfs is None and msf is not None and ps:
-            mfs_v = _f32(float(msf)) * float(ps)
+            # Rounded down to a half point (0.2 x 28 -> 5.5; 0.5 x 14 -> 7;
+            # the only two cases in the PhotoDay goldens).
+            mfs_v = math.floor(_f32(float(msf)) * float(ps) * 2) / 2
         else:
             mfs_v = float(mfs or "8.5")
         x.put(o, "UIMinimumFontSize", b.float32(mfs_v))
@@ -856,7 +859,9 @@ def button(x, el):
     if el.get("buttonType") is not None:
         x.put(o, "UIButtonType", b.int8(BUTTON_TYPES[el.get("buttonType")]))
     fd = el.find("fontDescription")
-    x.put(o, "UIFont", font(x, fd) if fd is not None else system_font(x, 18.0))
+    # Default font: 15pt for a system button, 18pt for a custom one (PhotoDay goldens).
+    default = 15.0 if el.get("buttonType") == "system" else 18.0
+    x.put(o, "UIFont", font(x, fd) if fd is not None else system_font(x, default))
     for ins in el.findall("inset"):
         key = {"imageEdgeInsets": "UIImageEdgeInsets", "titleEdgeInsets": "UITitleEdgeInsets",
                "contentEdgeInsets": "UIContentEdgeInsets"}.get(ins.get("key"))
@@ -1024,10 +1029,11 @@ def activity_indicator(x, el):
         x.put(o, "UIColor", c)
         x.put(o, "UITintColor", c)
         x.put(o, "UIDisableUpdateColorOnTraitCollectionChange", YES)
-    elif el.get("style") == "whiteLarge":
-        x.put(o, "UIColor", (N.NIL, None))
     else:
-        _fail(el, "activityIndicatorView default color", x.where)
+        # No color element: nil; medium also tints secondaryLabelColor (goldens).
+        x.put(o, "UIColor", (N.NIL, None))
+        if el.get("style") == "medium":
+            x.put(o, "UITintColor", x.I.build_color(x.b, "secondaryLabelColor", x.where, x.resources))
     if _bool(el, "animating"):
         x.put(o, "UIAnimating", YES)
     finish_swap(x, o)
@@ -1054,6 +1060,7 @@ def _attr_code(I, a):
 def _constraint(x, c, owner_el, owner):
     I, b = x.I, x.b
     o = x.new("NSLayoutConstraint")
+    x.ids[c.get("id")] = o  # outlets may point at a constraint (VCFilter)
 
     def item(i):
         if i is None:
@@ -1355,6 +1362,9 @@ def runtime_attributes(x, el, target):
             v = x.new("NSNumber")
             if num.tag == "integer":
                 x.put(v, "NS.intval", int_fit(int(num.get("value"))))
+            elif num.tag == "real" and float(num.get("value")).is_integer():
+                # an integral real is stored as an integer (VCSplash: real 12)
+                x.put(v, "NS.intval", int_fit(int(float(num.get("value")))))
             elif num.tag == "real":
                 x.put(v, "NS.dblval", x.b.float64(float(num.get("value"))))
             else:
