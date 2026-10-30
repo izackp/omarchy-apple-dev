@@ -5294,17 +5294,23 @@ def _main_flags(argv):
 
 
 def _main_parse(argv, flags_with_value, known_flags):
-    """The first --compile or --link ends the parse and takes the rest of
-    argv; a value flag skips its value; .storyboard inputs collect. Returns
-    (action, action_args, positional), or None after printing the
-    unknown-argument error."""
+    """--compile takes OUT and IN, and flags may follow them as in Apple's
+    order; the first --link ends the parse and takes the rest of argv; a value
+    flag skips its value; .storyboard inputs collect. Returns (action,
+    action_args, positional), or None after printing the unknown-argument
+    error."""
     action = None
     action_args = []
     positional = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "--compile" or a == "--link":
+        if a == "--compile" and action is None:
+            action = a
+            action_args = argv[i + 1:i + 3]
+            i += 3
+            continue
+        if a == "--link":
             action = a
             action_args = argv[i + 1:]
             break
@@ -5358,11 +5364,15 @@ def _main_compile_storyboard(positional, argv):
 
 
 def _main_compile(action_args, argv):
-    """CompileXib: ibtool [flags] --compile OUT.nib IN.xib."""
+    """CompileXib: ibtool [flags] --compile OUT.nib IN.xib [flags]; with a
+    .storyboard, OUT.storyboardc (what a --compilation-directory compile
+    writes, which Apple's --compile matches: PhotoDay launch screens)."""
     if len(action_args) != 2:
         print("error: ibtool: --compile needs OUT.nib and IN.xib", file=sys.stderr)
         return 2
     out, xib = action_args
+    if xib.endswith(".storyboard"):
+        return _main_compile_storyboard_to(out, xib, argv)
     try:
         data = compile_xib(xib)
     except (XibError, ET.ParseError) as e:
@@ -5387,6 +5397,29 @@ def _main_compile(action_args, argv):
         if os.path.isdir(out):
             shutil.rmtree(out)
     os.replace(tmp, out)  # no partial output on failure
+    return 0
+
+
+def _main_compile_storyboard_to(out, src, argv):
+    """--compile OUT.storyboardc IN.storyboard, through a compilation directory
+    beside OUT so a failure leaves no partial output."""
+    comp = out + ".tmp-compilation"
+    if os.path.isdir(comp):
+        shutil.rmtree(comp)
+    os.makedirs(comp)
+    try:
+        sbc = compile_storyboard(src, comp)
+    except (XibError, ET.ParseError) as e:
+        shutil.rmtree(comp)
+        print(f"error: ibtool: {e}", file=sys.stderr)
+        return 1
+    _main_partial_plist(argv)
+    if os.path.isdir(out):
+        shutil.rmtree(out)
+    elif os.path.exists(out):
+        os.remove(out)
+    os.replace(sbc, out)
+    shutil.rmtree(comp)
     return 0
 
 

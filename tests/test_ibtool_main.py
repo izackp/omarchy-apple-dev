@@ -116,9 +116,10 @@ class MainEntry(unittest.TestCase):
         rc, out, err = run_cli("--compile", "o.nib")
         self.assertEqual((rc, out, err),
                          (2, "", "error: ibtool: --compile needs OUT.nib and IN.xib\n"))
+        # Flags may follow OUT and IN (Apple's order), so a third operand is
+        # an unknown argument.
         rc, out, err = run_cli("--compile", "a", "b", "c")
-        self.assertEqual((rc, out, err),
-                         (2, "", "error: ibtool: --compile needs OUT.nib and IN.xib\n"))
+        self.assertEqual((rc, out, err), (2, "", "error: ibtool: unknown argument 'c'\n"))
 
     def test_compile_xib_success(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,6 +128,27 @@ class MainEntry(unittest.TestCase):
             self.assertEqual((rc, stdout, err), (0, "", ""))
             self.assertTrue(os.path.exists(out))
             self.assertFalse(os.path.exists(out + ".tmp-nibarchive"))
+
+    def test_compile_apple_argument_order(self):
+        """Flags after OUT and IN, as Xcode passes them; a .storyboard
+        compiles to OUT.storyboardc, the same files as a compilation
+        directory gets."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "o.nib")
+            rc, stdout, err = run_cli("--compile", out, str(XIB), *FLAGS)
+            self.assertEqual((rc, stdout, err), (0, "", ""))
+            self.assertTrue(os.path.isfile(out))
+            sbc = Path(tmp, "o.storyboardc")
+            rc, stdout, err = run_cli("--compile", str(sbc), str(SB), *FLAGS)
+            self.assertEqual((rc, stdout, err), (0, "", ""))
+            comp = Path(tmp, "comp")
+            run_cli(*FLAGS, str(SB), "--compilation-directory", str(comp))
+            want = comp / "LaunchScreenPhone.storyboardc"
+            self.assertEqual(sorted(f.name for f in sbc.iterdir()),
+                             sorted(f.name for f in want.iterdir()))
+            for f in want.iterdir():
+                self.assertEqual((sbc / f.name).read_bytes(), f.read_bytes(), f.name)
+            self.assertFalse(Path(str(sbc) + ".tmp-compilation").exists())
 
     def test_compile_xib_parse_error(self):
         with tempfile.TemporaryDirectory() as tmp:
