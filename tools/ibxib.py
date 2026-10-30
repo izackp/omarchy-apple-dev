@@ -1592,7 +1592,19 @@ def constraint_order(I, view_el, cons):
         if attr not in OTHER_ORDER or (oattr is not None and oattr not in OTHER_ORDER):
             raise Unsupported(f"constraint {c.get('id')}: attribute {attr}/{oattr}")
         other_idx = 0 if guide_item else index.get(other, -1)
+        if guide_item and fa == "trailing" and second in edges:
+            # guide.trailing = item.trailing: the item whose frame reaches
+            # furthest right first, the constant regardless (probe
+            # guide-trailing; VCPhotoConfirmation golden).
+            other_idx = -edges[second]
         return gkey + (1, OTHER_ORDER.index(attr), rel, other_idx)
+
+    subs = view_el.find("subviews")
+    edges = {}
+    for s in (subs if subs is not None else ()):
+        r = s.find("rect[@key='frame']")
+        if r is not None:
+            edges[s.get("id")] = float(r.get("x", "0")) + float(r.get("width", "0"))
 
     # Groups at the same frame origin tie; Apple then orders them by the item's
     # document id, as strings (VCTermsModal: 1zG before Qcb, c9Q before pWd).

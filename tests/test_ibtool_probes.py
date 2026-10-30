@@ -27,6 +27,9 @@ BYTE_IDENTICAL = [
     # (unshared), clearColor without a tint; custom-type buttons have no
     # UIButtonType (tools/ibxib.py).
     "button-config",
+    # guide.trailing = item.trailing constraints: the item whose frame reaches
+    # furthest right first, whatever the constants (tools/ibxib.py).
+    "guide-trailing",
     "nosymbolic",
     # Segmented controls of 1-5 segments: positions none/3/1..., the selected
     # segment's view last, alignments, no selection (-1 as int64).
