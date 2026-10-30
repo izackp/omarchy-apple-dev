@@ -1166,11 +1166,41 @@ def pairs_pass(x):
             x.put(p, "UIKeyPath", x.s(key_path))
             out.append(p)
             continue
-        try:
-            out += x.I._uda_build(x.b, el, target, x.resources, x.named)
-        except x.I.XibError as e:
-            raise Unsupported(str(e))
+        out += runtime_attributes(x, el, target)
     return out
+
+
+def runtime_attributes(x, el, target):
+    """<userDefinedRuntimeAttributes> -> UINibKeyValuePair objects."""
+    pairs = []
+    for a in el.find("userDefinedRuntimeAttributes"):
+        t, kp = a.get("type"), a.get("keyPath")
+        if t == "color":
+            v = keyed_color(x, a, "value")
+        elif t == "image":
+            v = image(x, a.get("value"), a.get("catalog"))
+        elif t == "number":
+            num = a.find("*[@key='value']")
+            v = x.new("NSNumber")
+            if num.tag == "integer":
+                x.put(v, "NS.intval", int_fit(int(num.get("value"))))
+            elif num.tag == "real":
+                x.put(v, "NS.dblval", x.b.float64(float(num.get("value"))))
+            else:
+                _fail(a, f"number <{num.tag}>", x.where)
+        elif t == "boolean":
+            v = x.new("NSNumber")
+            x.put(v, "NS.intval", x.b.int8(1 if a.get("value") == "YES" else 0))
+        elif t == "string":
+            v = x.s(a.get("value"))
+        else:
+            _fail(a, f"runtime attribute type {t}", x.where)
+        p = x.new("UINibKeyValuePair")
+        x.put(p, "UIObject", target)
+        x.put(p, "UIValue", v)
+        x.put(p, "UIKeyPath", x.s(kp))
+        pairs.append(p)
+    return pairs
 
 
 # ---------------------------------------------------------------- document
