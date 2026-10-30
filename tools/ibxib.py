@@ -1089,6 +1089,47 @@ def text_field(x, el):
     return o
 
 
+TEXT_VIEW_ATTRS = SCROLL_ATTRS | {"editable", "textAlignment", "layoutManager"}
+TEXT_VIEW_SUBS = VIEW_SUBS | {"fontDescription", "textInputTraits"}
+
+
+def text_view(x, el):
+    """<textView> without text (the PhotoDay debug screens fill it in code)."""
+    check(x, el, TEXT_VIEW_ATTRS, TEXT_VIEW_SUBS)
+    traits = el.find("textInputTraits[@key='textInputTraits']")
+    # Sentences is a text view's default capitalization: Apple stores nothing.
+    if traits is not None and (set(traits.attrib) - {"key", "autocapitalizationType"}
+                               or traits.get("autocapitalizationType", "sentences") != "sentences"):
+        _fail(traits, "text view input traits", x.where)
+    if el.get("layoutManager") not in (None, "textKit1"):
+        _fail(el, f"layoutManager {el.get('layoutManager')}", x.where)
+    b, I = x.b, x.I
+    o = new_view_obj(x, el, "UITextView")
+    view_keys(x, el, o, top=el in x.tops)
+    scroll_keys(x, el, o)
+    x.put(o, "UIFont", font(x, el.find("fontDescription")) or system_font(x, 12.0))
+    tc = keyed_color(x, el, "textColor")
+    if tc is None:
+        _fail(el, "textView without textColor", x.where)
+    x.put(o, "UITextColor", tc)
+    x.put(o, "UITextAlignment", b.int8(I.TEXT_ALIGNMENTS[el.get("textAlignment", "left")]))
+    if el.get("editable") == "NO":
+        x.put(o, "UIEditable", NO)
+    if el.get("layoutManager") == "textKit1":
+        x.put(o, "UITextViewTextKitCodingFlavor", b.int8(1))
+    # The find-highlight colors, always the same (VCDebug goldens).
+    hl = x.new("NSDictionary")
+    hl.add("NSInlinedValue", *YES)
+    for k, name in (("NSColor", "systemBlueColor"),
+                    ("NSTextHighlightOutlineColor", "secondarySystemFillColor")):
+        hl.add("UINibEncoderEmptyKey", N.OBJREF, x.s(k).idx)
+        hl.add("UINibEncoderEmptyKey", N.OBJREF, I.build_color(b, name, x.where, {}).idx)
+    x.put(o, "UITextHighlightAttributes", hl)
+    x.put(o, "UITextAllowsNumberPadPopover", YES)
+    finish_swap(x, o)
+    return o
+
+
 SWITCH_ATTRS = VIEW_ATTRS | CONTROL_ATTRS | {"on"}
 SWITCH_SUBS = VIEW_SUBS
 
@@ -1336,7 +1377,7 @@ def table_view(x, el):
 
 BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
             "tableView": table_view, "stackView": stack_view,
-            "visualEffectView": visual_effect_view,
+            "visualEffectView": visual_effect_view, "textView": text_view,
             "segmentedControl": segmented_control, "tableViewCell": table_view_cell,
             "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
