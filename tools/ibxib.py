@@ -1158,7 +1158,7 @@ def constraint_order(I, view_el, cons):
         rel = RELATION_ORDER[c.get("relation", "equal")]
         if first == owner and second is None:
             # the view's own size constraints come first
-            return (0, 0.0, 0.0, 1, OTHER_ORDER.index(fa), 0, 0)
+            return (0, 0.0, 0.0, 1, OTHER_ORDER.index(fa), rel, 0)
         guide_item = first in guides and second is not None and second not in guides \
             and second != owner
         try:
