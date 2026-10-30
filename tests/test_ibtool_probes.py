@@ -28,6 +28,9 @@ BYTE_IDENTICAL = [
     # UIButtonType (tools/ibxib.py).
     "button-config",
     "nosymbolic",
+    # Segmented controls of 1-5 segments: positions none/3/1..., the selected
+    # segment's view last, alignments, no selection (-1 as int64).
+    "segmented",
     # File's Owner customClass/customModule leave the nib unchanged (its golden
     # equals swap.nib's).
     "owner-module",

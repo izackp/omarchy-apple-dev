@@ -49,7 +49,10 @@ class Unsupported(Exception):
 
 
 def int_fit(v):
-    """The narrowest integer value type holding v, as Apple's encoder picks."""
+    """The narrowest integer value type holding v, as Apple's encoder picks; a
+    negative value is always 64-bit (probe segmented: selectedSegmentIndex -1)."""
+    if v < 0:
+        return (N.INT64, v)
     for t, bits in ((N.INT8, 8), (N.INT16, 16), (N.INT32, 32)):
         if -(1 << (bits - 1)) <= v < (1 << (bits - 1)):
             return (t, v)
@@ -369,7 +372,8 @@ CONTENT_MODES = {"scaleToFill": 0, "scaleAspectFit": 1, "scaleAspectFill": 2, "r
                  "topRight": 10, "bottomLeft": 11, "bottomRight": 12}
 # Classes whose hugging priority defaults to 750: Apple stores the priority
 # only when it differs from the class default.
-INTRINSIC_HUGGING = {"UISwitch": "750", "UIActivityIndicatorView": "750"}
+# A segmented control always stores its hugging, {250, 250} included (probe segmented).
+INTRINSIC_HUGGING = {"UISwitch": "750", "UIActivityIndicatorView": "750", "UISegmentedControl": "750"}
 VIEW_ATTRS = {"id", "key", "contentMode", "opaque", "clipsSubviews", "hidden", "alpha",
               "userInteractionEnabled", "clearsContextBeforeDrawing", "multipleTouchEnabled",
               "translatesAutoresizingMaskIntoConstraints", "customClass", "customModule",
@@ -1060,7 +1064,52 @@ def activity_indicator(x, el):
     return o
 
 
+SEGMENTED_ATTRS = VIEW_ATTRS | CONTROL_ATTRS | {"segmentControlStyle", "selectedSegmentIndex"}
+
+
+def segmented_control(x, el):
+    """<segmentedControl> with titled segments (probe segmented; PhotoDay goldens)."""
+    check(x, el, SEGMENTED_ATTRS, VIEW_SUBS | {"segments"})
+    if el.get("segmentControlStyle", "plain") != "plain":
+        _fail(el, "segmentControlStyle", x.where)
+    b = x.b
+    o = new_view_obj(x, el, "UISegmentedControl")
+    view_keys(x, el, o, top=el in x.tops)
+    control_keys(x, el, o)
+    v = el.get("contentVerticalAlignment", "center")
+    if v != "center":
+        x.put(o, "UIContentVerticalAlignment2", b.int8(V_ALIGN[v]))
+    x.put(o, "UIPointerInteractionEnabled", YES)
+    segs = []
+    for n, s in enumerate(el.find("segments") if el.find("segments") is not None else ()):
+        if s.tag != "segment" or set(s.attrib) != {"title"} or len(s):
+            _fail(s, "segment shape", x.where)
+        q = x.new("UISegment")
+        # Segments are unsized until layout: (0, 0, 0, 32) at any control height.
+        x.put(q, "UIBounds", b.geom(0.0, 0.0, 0.0, 32.0))
+        x.put(q, "UICenter", b.geom(0.0, 16.0))
+        x.put(q, "UIDeepDrawRect", YES)
+        x.put(q, "UIAutoresizeSubviews", YES)
+        x.put(q, "UIViewSemanticContentAttribute", b.int8(0))
+        x.put(q, "UIViewLargeContentStoredProperties", (N.NIL, None))
+        x.put(q, "UISegmentInfo", x.s(s.get("title")))
+        x.put(q, "UISegmentStyle", b.int8(5))
+        # As Apple's ibtool 27 writes them: none, 3, then 1 for every later one.
+        if n:
+            x.put(q, "UISegmentPosition", b.int8(3 if n == 1 else 1))
+        segs.append(q)
+    sel = int(el.get("selectedSegmentIndex", "-1"))
+    # The selected segment's view is last (frontmost).
+    views = [q for n, q in enumerate(segs) if n != sel] + ([segs[sel]] if 0 <= sel < len(segs) else [])
+    x.put(o, "UISubviews", x.array(views, "NSMutableArray"))
+    x.put(o, "UISegments", x.array(segs, "NSMutableArray"))
+    x.put(o, "UISelectedSegmentIndex", int_fit(sel))
+    finish_swap(x, o)
+    return o
+
+
 BUILDERS = {"switch": switch, "activityIndicatorView": activity_indicator,
+            "segmentedControl": segmented_control,
             "textField": text_field, "scrollView": scroll_view, "view": view, "label": label, "button": button, "imageView": image_view}
 
 
