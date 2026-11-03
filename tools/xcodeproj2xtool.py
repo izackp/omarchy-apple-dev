@@ -452,6 +452,9 @@ class Generator:
         # iOS: also emit <App>-Link, an executable that links the app, so a
         # plain `swift build` produces the binary (otherwise xtool links it).
         self.link_executable = False
+        # Ship every IB file as a resource without probing it; for a packager
+        # whose ibtool fails the build on any it cannot compile.
+        self.no_ib_probe = False
         self.target_name = target_name
         self.forced_bundle_id = bundle_id
         self.project = self.objs[self.data["rootObject"]]
@@ -1235,7 +1238,7 @@ class Generator:
                     else os.path.join(os.path.basename(src_anc), rel)
             else:
                 rp = p
-            if ibtool_compiles(os.path.join(self.proj_dir, p)):
+            if self.no_ib_probe or ibtool_compiles(os.path.join(self.proj_dir, p)):
                 resources.append((".process", rp))
                 # synced groups pre-exclude their IB files; an emitted one
                 # must not stay in exclude: (SwiftPM would drop it again)
@@ -3786,6 +3789,11 @@ def main():
     ap.add_argument("--link-executable", action="store_true",
                     help="iOS: add an <App>-Link executable product that links the "
                          "app, so swift build produces its binary without xtool")
+    ap.add_argument("--no-ib-probe", action="store_true",
+                    help="ship every xib and storyboard as a resource instead of "
+                         "try-compiling each with the Linux ibtool and excluding "
+                         "the ones it cannot compile; the packager's ibtool then "
+                         "fails the build on those")
     args = ap.parse_args()
     if args.self_test:
         self_test()
@@ -3807,6 +3815,7 @@ def main():
             ap.error(f"--package-traits {spec!r}: expected PACKAGE=TRAIT[,TRAIT]")
         gen.package_traits[pkg.lower()] = [t for t in traits.split(",") if t]
     gen.link_executable = args.link_executable
+    gen.no_ib_probe = args.no_ib_probe
     gen.run()
 
 
