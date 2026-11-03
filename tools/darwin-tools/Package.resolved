@@ -4,9 +4,9 @@
     {
       "identity" : "assetkit",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/joshuaswarren/AssetKit",
+      "location" : "https://github.com/izackp/AssetKit",
       "state" : {
-        "revision" : "09875ccce71e15244aa4910546e1f6afb6ef71d9"
+        "revision" : "39496d779f6539f84364452e52adc61c689d03d1"
       }
     },
     {

@@ -13,8 +13,10 @@ let package = Package(
         // BITMAPKEYS descriptors as value masks, the exact TVL row stride, and symbol templates with relative
         // paths, arcs and weight layers (FINDINGS.md, "Assets.car files that Apple's assetutil rejects"). The
         // macosx platform compiles with macOS 26's 13-attribute
-        // rendition-key schema so AppKit resolves symbols and images (60).
-        .package(url: "https://github.com/joshuaswarren/AssetKit", revision: "09875ccce71e15244aa4910546e1f6afb6ef71d9"),
+        // rendition-key schema so AppKit resolves symbols and images (60). izackp's fork adds
+        // template-rendering-intent on PNG imagesets (renditionFlags 0x8, as Xcode writes), without
+        // which a template PNG tab bar icon stays untinted.
+        .package(url: "https://github.com/izackp/AssetKit", revision: "39496d779f6539f84364452e52adc61c689d03d1"),
         .package(url: "https://github.com/tayloraswift/swift-png", from: "4.5.0"),
     ],
     targets: [
