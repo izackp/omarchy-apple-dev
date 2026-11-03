@@ -25,6 +25,7 @@ remain as declared; Package.resolved revisions do not rewrite them.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -252,27 +253,69 @@ SETTING_MODIFIERS = {
 }
 
 
+_ibtool_digest = None
+
+
+def ibtool_digest():
+    """SHA-256 over ibtool and every module beside it it could load, so a
+    cached probe answer never outlives a change to the compiler."""
+    global _ibtool_digest
+    if _ibtool_digest is None:
+        tools = os.path.dirname(os.path.abspath(__file__))
+        h = hashlib.sha256()
+        for name in sorted(os.listdir(tools)):
+            if name == "ibtool" or name.endswith((".py", ".json")):
+                h.update(name.encode() + b"\0")
+                with open(os.path.join(tools, name), "rb") as f:
+                    h.update(f.read())
+        _ibtool_digest = h.hexdigest()
+    return _ibtool_digest
+
+
 def ibtool_compiles(path):
     """Whether the repo's ibtool compiles one Interface Builder source.
 
     Try-compile into a temp dir; exit 0 means SwiftBuild will be able to run
-    ibtool on it, so the file can ship as a normal resource."""
+    ibtool on it, so the file can ship as a normal resource. The answer is
+    cached under $XDG_CACHE_HOME/xcodeproj2xtool, keyed by the file's bytes and
+    ibtool's (0.2 s a probe: 15 s of a 76-xib app's conversion)."""
     tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ibtool")
-    if os.path.splitext(path)[1].lower() not in (".storyboard", ".xib"):
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".storyboard", ".xib"):
         return False
     try:
+        with open(path, "rb") as f:
+            key = hashlib.sha256(ibtool_digest().encode() + ext.encode() + f.read()).hexdigest()
+    except OSError:
+        return False
+    cache = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+                         "xcodeproj2xtool", "ibtool-probe", key[:2], key)
+    try:
+        with open(cache) as f:
+            return f.read() == "1"
+    except OSError:
+        pass
+    try:
         with tempfile.TemporaryDirectory(prefix="xcodeproj2xtool-ibtool-") as tmp:
-            if path.lower().endswith(".xib"):
+            if ext == ".xib":
                 cmd = [sys.executable, tool, "--compile",
                        os.path.join(tmp, "probe.nib"), path]
             else:
                 cmd = [sys.executable, tool, path,
                        "--compilation-directory", tmp]
-            return subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, timeout=60,
-                                  check=False).returncode == 0
+            ok = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=60,
+                                check=False).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+    try:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache + ".tmp", "w") as f:
+            f.write("1" if ok else "0")
+        os.replace(cache + ".tmp", cache)
+    except OSError:
+        pass
+    return ok
 
 
 def walk_files(root):
