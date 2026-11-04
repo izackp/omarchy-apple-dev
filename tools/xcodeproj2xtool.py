@@ -441,6 +441,8 @@ class Generator:
         self.icon_assets = 0
         # Alternate app icon names (ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES).
         self.alternate_icon_names = []
+        # The app target's CODE_SIGN_ENTITLEMENTS, absolute.
+        self.app_entitlements = None
         # Embedded extension name -> its ASSETCATALOG_COMPILER_APPICON_NAME.
         self.extension_icons = {}
         self.out_dir = out_dir or os.path.join(self.proj_dir, "omarchy-xtool")
@@ -2439,6 +2441,8 @@ class Generator:
         with open(os.path.join(self.out_dir, "xtool.env"), "w") as f:
             # Sourced by ship.sh: quote every value (extension product names may contain spaces).
             f.write(f"APP_ICON={shlex.quote(icon)}\n")
+            if self.app_entitlements:
+                f.write(f"APP_ENTITLEMENTS={shlex.quote(self.app_entitlements)}\n")
             if self.alternate_icon_names:
                 f.write("ALTERNATE_APP_ICONS=" + shlex.quote(" ".join(self.alternate_icon_names)) + "\n")
             if (self.setting(layers, "ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS") or "").upper() == "YES":
@@ -2515,8 +2519,14 @@ class Generator:
         app_info_path = self._write_bundle_plist(name, app_info, extension=False)
         ent = self.setting(layers, "CODE_SIGN_ENTITLEMENTS")
         if ent:
-            self.warn(f"CODE_SIGN_ENTITLEMENTS {ent!r} not wired (xtool dev signs "
-                      "without entitlements; ship.sh signs with its own)")
+            # Handed to the packager through xtool.env: it signs with this file, as
+            # Xcode does, not with whatever the provisioning profile allows.
+            for var in ("$(SRCROOT)/", "${SRCROOT}/", "$(PROJECT_DIR)/", "${PROJECT_DIR}/"):
+                ent = ent.replace(var, "")
+            self.app_entitlements = os.path.join(self.proj_dir, ent)
+            if not os.path.isfile(self.app_entitlements):
+                self.warn(f"CODE_SIGN_ENTITLEMENTS {ent!r}: no such file")
+                self.app_entitlements = None
 
         extensions = []
         pkg_seen = set(packages)
