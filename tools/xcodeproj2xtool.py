@@ -412,6 +412,28 @@ def sw_sy(v):
     return json.dumps(v)  # Swift string literals and JSON strings agree here
 
 
+# Swift's upcoming features, as `swiftc -print-supported-features` names them
+# (Swift 6.3.3). Xcode's SWIFT_UPCOMING_FEATURE_<NAME> settings match these
+# ignoring case and underscores, except for UPCOMING_FEATURE_ALIASES.
+UPCOMING_FEATURES = [
+    "ConciseMagicFile", "ForwardTrailingClosures", "StrictConcurrency",
+    "BareSlashRegexLiterals", "DeprecateApplicationMain",
+    "ImportObjcForwardDeclarations", "DisableOutwardActorInference",
+    "IsolatedDefaultValues", "GlobalConcurrency", "InferSendableFromCaptures",
+    "ImplicitOpenExistentials", "RegionBasedIsolation", "DynamicActorIsolation",
+    "NonfrozenEnumExhaustivity", "GlobalActorIsolatedTypesUsability",
+    "ExistentialAny", "InternalImportsByDefault", "MemberImportVisibility",
+    "InferIsolatedConformances", "NonisolatedNonsendingByDefault",
+    "ImmutableWeakCaptures",
+]
+
+# Xcode settings whose name is not the feature's.
+UPCOMING_FEATURE_ALIASES = {
+    "IMPORT_OBJC_FORWARD_DECLS": "ImportObjcForwardDeclarations",
+    "DISABLE_OUTWARD_ACTOR_ISOLATION": "DisableOutwardActorInference",
+}
+
+
 class Generator:
     def __init__(self, proj_path, target_name=None, out_dir=None, bundle_id=None,
                  workspace=None, configuration="Release", products_dir=None):
@@ -1692,6 +1714,23 @@ class Generator:
 
     # -- manifest assembly --------------------------------------------------
 
+    def upcoming_feature_name(self, xcode):
+        """The compiler's name for Xcode's SWIFT_UPCOMING_FEATURE_<xcode> setting.
+
+        Xcode spells them in SCREAMING_SNAKE (CONCISE_MAGIC_FILE); swiftc and
+        SwiftPM want the feature's own name (ConciseMagicFile), and silently
+        ignore one they do not know, so passing the suffix through enables
+        nothing. None (with a warning) for a setting this table lacks.
+        """
+        name = UPCOMING_FEATURE_ALIASES.get(xcode)
+        if name is None:
+            key = xcode.replace("_", "").lower()
+            name = next((f for f in UPCOMING_FEATURES if f.lower() == key), None)
+        if name is None:
+            self.warn(f"SWIFT_UPCOMING_FEATURE_{xcode} not mapped: no upcoming "
+                      "feature by that name (add it to UPCOMING_FEATURES)")
+        return name
+
     def swift_settings(self, layers):
         out = []
         v = self.setting(layers, "SWIFT_VERSION") or ""
@@ -1713,8 +1752,8 @@ class Generator:
             for k, val in l.items():
                 if k.startswith("SWIFT_UPCOMING_FEATURE_") and val == "YES" and \
                         "[sdk=" not in k:
-                    feat = k[len("SWIFT_UPCOMING_FEATURE_"):]
-                    if feat not in upcoming:
+                    feat = self.upcoming_feature_name(k[len("SWIFT_UPCOMING_FEATURE_"):])
+                    if feat and feat not in upcoming:
                         upcoming.append(feat)
         for feat in upcoming:
             out.append(f'.enableUpcomingFeature({sw_sy(feat)})')
@@ -3189,7 +3228,8 @@ def _self_test(root):
         ("swift mode v5", ".swiftLanguageMode(.v5)" in pkg),
         ("defaultIsolation", ".defaultIsolation(MainActor.self)" in pkg),
         ("approachable concurrency as features", ".enableUpcomingFeature(\"NonisolatedNonsendingByDefault\")" in pkg),
-        ("upcoming feature", '.enableUpcomingFeature("CONCISE_MAGIC_FILE")' in pkg),
+        ("upcoming feature", '.enableUpcomingFeature("ConciseMagicFile")' in pkg
+            and "CONCISE_MAGIC_FILE" not in pkg),
         ("bare slash regex feature", '.enableUpcomingFeature("BareSlashRegexLiterals")' in pkg),
         ("source ancestor symlink", 'exclude' in pkg and '"src/Unused.swift"' in pkg),
         ("resource process", '.process("src/Assets.xcassets")' in pkg),
