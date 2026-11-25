@@ -185,7 +185,9 @@ What actually breaks:
 
 The fix in `install-toolchain.sh`: the SDK step now runs `xtool sdk build`
 once and keeps the resulting portable bundle at
-`~/.cache/xtool/darwin-<xcodever>.xtoolsdk`; the registered copy is made
+`~/.local/share/xtool/darwin-<xcodever>.xtoolsdk` (`~/.cache/xtool` before:
+a cache cleaner deleted it, and with it the Xcode version App Store builds
+stamp); the registered copy is made
 FROM that cache, so first install and every later repair exercise the same
 path. Whenever `swift sdk list` lacks darwin on a re-run, the script
 re-registers from the cache — no .xip, no network.

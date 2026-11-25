@@ -145,7 +145,8 @@ FINDINGS.md item 57 has the details.
 A toolchain swap changes Swift's path. Pairing, auth and the SDK cache are
 stored outside that toolchain: USB pairing in `~/.pymobiledevice3/` (plus
 `/var/lib/lockdown` records), Apple ID auth in `~/.local/share/xtool/`, and
-the SDK in `~/.cache/xtool/darwin-iPhoneOS<ver>.xtoolsdk`. Re-register a
+the SDK in `~/.local/share/xtool/darwin-iPhoneOS<ver>.xtoolsdk` (`$XDG_DATA_HOME/xtool`;
+older installs kept it in `~/.cache/xtool`, and the installer moves it). Re-register a
 current SDK cache into the new toolchain:
 
 ```

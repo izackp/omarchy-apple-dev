@@ -220,8 +220,9 @@ echo "== 5. App Intents metadata =="
 # the target's .swiftconstvalues (swift-build emits them) become <bundle>/Metadata.appintents/.
 # The tool skips a bundle that does not load AppIntents.framework and exits nonzero on anything it
 # cannot reproduce exactly. App Shortcuts training needs Xcode's SiriSSUKitModel resources, which
-# install-toolchain.sh keeps next to the SDK cache (or set SSU_RESOURCES).
-ssu=${SSU_RESOURCES:-$(ls -dt "$HOME"/.cache/xtool/darwin-*.xtoolsdk.SiriSSUKitModel 2>/dev/null | head -n1 || true)}
+# install-toolchain.sh keeps next to the SDK it stores (or set SSU_RESOURCES): SDK_CACHE, else
+# $XDG_DATA_HOME/xtool, else ~/.cache/xtool (older installs).
+ssu=${SSU_RESOURCES:-$(ls -dt ${SDK_CACHE:-"${XDG_DATA_HOME:-$HOME/.local/share}/xtool" "$HOME/.cache/xtool"}/darwin-*.xtoolsdk.SiriSSUKitModel 2>/dev/null | head -n1 || true)}
 sdk_root="$darwin_sdk/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
 for bundle in "$app" "$app"/PlugIns/*.appex; do
   [ -d "$bundle" ] || continue

@@ -48,7 +48,13 @@ TEST_TEAM = "TEST000000"
 SWIFTPM_DIR = (Path(os.environ["XDG_CONFIG_HOME"], "swiftpm") if os.environ.get("XDG_CONFIG_HOME")
                else Path.home() / ".swiftpm")
 SDK = Path(os.environ.get("DARWIN_SDK", SWIFTPM_DIR / "swift-sdks/darwin.artifactbundle"))
-XCODE_VERSION_PLISTS = sorted(Path.home().glob(".cache/xtool/darwin-*.xtoolsdk.version.plist"))
+# install-toolchain.sh's SDK store: SDK_CACHE, else $XDG_DATA_HOME/xtool (~/.local/share/xtool),
+# where cache cleaners don't reach. ~/.cache/xtool is where older installs put it.
+SDK_STORES = [Path(os.environ["SDK_CACHE"])] if os.environ.get("SDK_CACHE") else [
+    Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share", "xtool"),
+    Path.home() / ".cache/xtool"]
+XCODE_VERSION_PLISTS = next((p for p in (sorted(d.glob("darwin-*.xtoolsdk.version.plist"))
+                                         for d in SDK_STORES) if p), [])
 APP_GROUPS = [g for g in os.environ.get("APP_GROUPS", "").split(",") if g]
 
 

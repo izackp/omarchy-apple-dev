@@ -7,7 +7,7 @@
 # Needs Xcode's SiriSSUKitModel resources: SSU_RESOURCES, or the copy install-toolchain.sh keeps.
 set -euo pipefail
 here=$(dirname "$(readlink -f "$0")")
-ssu=${SSU_RESOURCES:-$(ls -dt "$HOME"/.cache/xtool/darwin-*.xtoolsdk.SiriSSUKitModel 2>/dev/null | head -n1 || true)}
+ssu=${SSU_RESOURCES:-$(ls -dt ${SDK_CACHE:-"${XDG_DATA_HOME:-$HOME/.local/share}/xtool" "$HOME/.cache/xtool"}/darwin-*.xtoolsdk.SiriSSUKitModel 2>/dev/null | head -n1 || true)}
 [ -d "$ssu" ] || { echo "no SiriSSUKitModel resources: set SSU_RESOURCES" >&2; exit 1; }
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Flutter only asks this for the Xcode version.
-v=$(ls "$HOME"/.cache/xtool/darwin-*.xtoolsdk.version.plist 2>/dev/null | tail -n1)
+# Flutter only asks this for the Xcode version. install-toolchain.sh keeps it beside the SDK it
+# stores: SDK_CACHE, else $XDG_DATA_HOME/xtool, else ~/.cache/xtool (older installs).
+v=
+for d in ${SDK_CACHE:-"${XDG_DATA_HOME:-$HOME/.local/share}/xtool" "$HOME/.cache/xtool"}; do
+  v=$(ls "$d"/darwin-*.xtoolsdk.version.plist 2>/dev/null | tail -n1)
+  [ -z "$v" ] || break
+done
 if [ -n "$v" ]; then
   python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); print("Xcode", p["CFBundleShortVersionString"]); print("Build version", p["ProductBuildVersion"])' "$v"
 else

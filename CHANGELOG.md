@@ -2,6 +2,16 @@
 
 ## v0.4.3
 
+### The SDK store moves out of ~/.cache
+
+- `install-toolchain.sh` kept the built SDK bundles, the Xcode `version.plist` and the SiriSSUKitModel resources in `~/.cache/xtool`. A cache cleaner emptied it, and App Store packaging then stopped with `asc.py: no Xcode version recorded with the SDK`. The default `SDK_CACHE` is now `$XDG_DATA_HOME/xtool` (`~/.local/share/xtool`). On its next run the installer moves anything still in `~/.cache/xtool` there.
+- These readers look in `SDK_CACHE` when it is set, else in the new place, then in `~/.cache/xtool`:
+  - `tools/asc.py`;
+  - `flutter/tools/gen-info-plist.py`;
+  - both `shims/xcodebuild`;
+  - `ship.sh`;
+  - `tests/appintentsmeta/check.sh`.
+
 ### ibtool compiles labels left empty in Interface Builder
 
 - A `<label>` with no `text` attribute (its text cleared in Interface Builder, to be set at run time) stopped `tools/ibxib.py` with `label without text`. `tools/ibtool` then fell back to its own builders, which refuse a Files Owner with outlets, so the error a build showed was `<placeholder> has unsupported subelement(s) ['connections']`, naming the wrong element. The label now compiles with every key it had before except `UIText`, so it decodes with nil text, as `UILabel`'s own encoder leaves out a nil text. No Apple golden covers this case yet.

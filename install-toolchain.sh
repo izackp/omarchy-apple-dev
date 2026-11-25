@@ -33,7 +33,17 @@ matching_xcode() {
 
 VENV="$HOME/pymobile3-venv"
 SDK_SRC="${SDK_SRC:-$HOME/xcode-apple-sdk-src}"
-SDK_CACHE="${SDK_CACHE:-$HOME/.cache/xtool}"
+# The built SDK bundles and the Xcode version.plist ship.sh stamps from. Not under ~/.cache:
+# cache cleaners empty it, and the bundle is the only way to re-register without the .xip.
+SDK_CACHE="${SDK_CACHE:-${XDG_DATA_HOME:-$HOME/.local/share}/xtool}"
+# Older installs kept it in ~/.cache/xtool: move what is left there.
+if [ "$SDK_CACHE" != "$HOME/.cache/xtool" ] && [ -d "$HOME/.cache/xtool" ]; then
+  mkdir -p "$SDK_CACHE"
+  for old in "$HOME"/.cache/xtool/darwin-*; do
+    if [ -e "$old" ] && [ ! -e "$SDK_CACHE/$(basename "$old")" ]; then mv "$old" "$SDK_CACHE/"; fi
+  done
+  rmdir "$HOME/.cache/xtool" 2>/dev/null || true
+fi
 
 # pymobiledevice3 venv helpers. The venv is built from the interpreter the
 # current shell resolves, never from a mise/asdf "latest" symlink: a symlink

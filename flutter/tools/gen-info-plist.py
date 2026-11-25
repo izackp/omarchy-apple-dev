@@ -75,9 +75,14 @@ info.update({
     "UIRequiredDeviceCapabilities": ["arm64"],
 })
 # DTXcode / DTXcodeBuild name the Xcode the SDK was built from; install-toolchain.sh
-# keeps that Xcode's version.plist beside the SDK cache (the file asc.py reads).
+# keeps that Xcode's version.plist beside the SDK it stores (the file asc.py reads): in
+# SDK_CACHE, else $XDG_DATA_HOME/xtool, else ~/.cache/xtool where older installs put it.
 import glob
-candidates = sorted(glob.glob(os.path.expanduser("~/.cache/xtool/darwin-*.xtoolsdk.version.plist")))
+stores = [os.environ["SDK_CACHE"]] if os.environ.get("SDK_CACHE") else [
+    os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "xtool"),
+    os.path.expanduser("~/.cache/xtool")]
+candidates = next((c for c in (sorted(glob.glob(os.path.join(d, "darwin-*.xtoolsdk.version.plist")))
+                               for d in stores) if c), [])
 if candidates:
     v = plistlib.load(open(candidates[-1], "rb"))
     parts = (v["CFBundleShortVersionString"].split(".") + ["0", "0"])[:3]
