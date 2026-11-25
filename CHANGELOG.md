@@ -2,6 +2,23 @@
 
 ## v0.4.3
 
+### The car check reads Xcode's chunked dmp2 renditions
+
+- `tools/car_check.py` failed `Intercom.framework/Assets.car`, which Xcode built, with `MLEC layout word 11 is neither the chunked form (4) nor Apple's dmp2 record (11)`. The check was wrong, not the file:
+  - The MLEC word at +4 is the form: 0 is one record, 1 is KCBC chunks.
+  - The word at +8 is the compression: 4 is LZFSE, 11 is dmp2.
+  - Intercom's tall images are dmp2 in chunks. Each KCBC payload is a 16-byte header (1, 2, the record's size, 0), then the `dmp2` marker.
+- The check does not decode dmp2, so chunked dmp2 gets no stride check. These checks still run on it:
+  - the chunk magic;
+  - each record's marker and size against its chunk;
+  - the rows against the header's height.
+- An unknown compression word is now reported as `MLEC compression word N is neither LZFSE (4) nor Apple's dmp2 (11)`.
+- `tests/test_car_check.py` turns a chunked LZFSE rendition into chunked dmp2. It checks that the result passes. It also checks four mutants, each caught:
+  - a missing marker;
+  - a wrong record size;
+  - one extra row;
+  - an unknown form.
+
 ### The SDK store moves out of ~/.cache
 
 - `install-toolchain.sh` kept the built SDK bundles, the Xcode `version.plist` and the SiriSSUKitModel resources in `~/.cache/xtool`. A cache cleaner emptied it, and App Store packaging then stopped with `asc.py: no Xcode version recorded with the SDK`. The default `SDK_CACHE` is now `$XDG_DATA_HOME/xtool` (`~/.local/share/xtool`). On its next run the installer moves anything still in `~/.cache/xtool` there.

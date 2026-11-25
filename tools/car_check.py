@@ -179,33 +179,46 @@ def _check_image_blocks(bom, problems):
         height = struct.unpack_from("<I", csi, 16)[0]
         name = csi[40:168].split(b"\0")[0].decode(errors="replace")
         stride, body = _tvl_stride(csi)
-        # MLEC bodies come in two forms. Retained cars (9156 renditions, Xcode actool and AssetKit): the word at +8 is 4 for
-        # chunked KCBC bodies (9104) and 11 for Apple's dmp2 pixel record (52). Only the dmp2 record, with its marker at +32,
-        # is not read here; any other value is reported.
+        # MLEC bodies: the word at +4 is the form (0 one record, 1 KCBC chunks), the word at +8 the compression (4 LZFSE,
+        # 11 Apple's dmp2). Retained cars (9156 renditions, Xcode actool and AssetKit) have chunked LZFSE (9104) and single
+        # dmp2 records (52), whose marker is at +32. Xcode also writes chunked dmp2 (Intercom.framework's tall images): each
+        # KCBC payload is a 16-byte header (1, 2, the record's size, 0) and a dmp2 record. dmp2 is not decoded here, so
+        # neither dmp2 form gets the stride check; a chunked one still has its chunk framing and rows checked.
         if csi[body:body + 4] != b"MLEC":
             continue
-        layout = struct.unpack_from("<I", csi, body + 8)[0]
+        form, layout = struct.unpack_from("<2I", csi, body + 4)
         if layout == 11 and csi[body + 32:body + 36] == b"dmp2":
             continue
         count = struct.unpack_from("<I", csi, body + 12)[0]
         pos, rows_total = body + 16, 0
         problem = None
-        if layout != 4:
-            problem = f"MLEC layout word {layout} is neither the chunked form (4) nor Apple's dmp2 record (11)"
-        elif stride is None:
+        if layout == 11 and form != 1:
+            problem = f"MLEC dmp2 body in form {form}, neither a single record (marker at +32) nor KCBC chunks (1)"
+        elif layout not in (4, 11):
+            problem = f"MLEC compression word {layout} is neither LZFSE (4) nor Apple's dmp2 (11)"
+        elif layout == 4 and stride is None:
             problem = "an MLEC body with no TVL 1007 stride"
         for chunk in range(count if problem is None else 0):
             if csi[pos:pos + 4] != b"KCBC":
                 problem = f"chunk {chunk} has no KCBC magic"
                 break
             rows, size = struct.unpack_from("<2I", csi, pos + 12)
-            raw = _lzfse_raw_size(csi[pos + 20:pos + 20 + size])
-            if raw is None:
-                problem = f"chunk {chunk}: the LZFSE block kind or length cannot be read"
+            payload = csi[pos + 20:pos + 20 + size]
+            if len(payload) != size:
+                problem = f"chunk {chunk} runs past the rendition's end"
                 break
-            if raw != rows * stride:
-                problem = f"chunk {chunk}: {rows} rows decode to {raw} bytes, the TVL stride {stride} wants {rows * stride}"
-                break
+            if layout == 11:
+                if payload[16:20] != b"dmp2" or struct.unpack_from("<I", payload, 8)[0] != size - 16:
+                    problem = f"chunk {chunk} is not a dmp2 record of its chunk's size"
+                    break
+            else:
+                raw = _lzfse_raw_size(payload)
+                if raw is None:
+                    problem = f"chunk {chunk}: the LZFSE block kind or length cannot be read"
+                    break
+                if raw != rows * stride:
+                    problem = f"chunk {chunk}: {rows} rows decode to {raw} bytes, the TVL stride {stride} wants {rows * stride}"
+                    break
             rows_total, pos = rows_total + rows, pos + 20 + size
         if problem is None and rows_total != height:
             problem = f"chunks cover {rows_total} rows, the header says {height}"

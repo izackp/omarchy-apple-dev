@@ -141,7 +141,30 @@ class CarCheckTest(unittest.TestCase):
     def test_an_unknown_mlec_layout_word_fails(self):
         data = car("action-assetkit.car")
         problems = car_check.check_car(with_bytes(data, first_chunk_offset(data) - 8, struct.pack("<I", 2)))
-        self.assertTrue(any("layout word 2" in p for p in problems), problems)
+        self.assertTrue(any("compression word 2" in p for p in problems), problems)
+
+    def test_chunked_dmp2_passes_and_its_framing_is_checked(self):
+        # Xcode's chunked dmp2 (Intercom.framework): compression word 11, KCBC chunks, each payload a 16-byte
+        # header (1, 2, record size, 0) then the dmp2 marker. Made here from the first chunked LZFSE rendition.
+        data = car("action-assetkit.car")
+        at = first_chunk_offset(data)
+        count = struct.unpack_from("<I", data, at - 4)[0]
+        out, pos, sizes = bytearray(with_bytes(data, at - 8, struct.pack("<I", 11))), at, []
+        for _ in range(count):
+            size = struct.unpack_from("<I", data, pos + 16)[0]
+            out[pos + 20:pos + 40] = struct.pack("<4I", 1, 2, size - 16, 0) + b"dmp2"
+            sizes.append((pos, size))
+            pos += 20 + size
+        dmp2 = bytes(out)
+        self.assertEqual(car_check.check_car(dmp2), [])
+        first, size = sizes[0]
+        for mutant, expected in ((with_bytes(dmp2, first + 36, b"XXXX"), "not a dmp2 record"),
+                                 (with_bytes(dmp2, first + 28, struct.pack("<I", size)), "not a dmp2 record"),
+                                 (with_bytes(dmp2, first + 12, struct.pack("<I", struct.unpack_from("<I", dmp2, first + 12)[0] + 1)), "chunks cover"),
+                                 (with_bytes(dmp2, at - 12, struct.pack("<I", 2)), "dmp2 body in form 2")):
+            with self.subTest(expected):
+                problems = car_check.check_car(mutant)
+                self.assertTrue(any(expected in p for p in problems), problems)
 
     def test_a_non_atlas_identifier_zero_needs_its_row(self):
         data = with_all_identifiers_zero(car("action-assetkit.car"))
