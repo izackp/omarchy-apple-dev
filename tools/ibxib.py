@@ -821,9 +821,11 @@ def label(x, el):
         x.put(o, "UITextAlignment", b.int8(align))
         x.put(o, "UIAttributedText", astr)
     else:
-        if el.get("text") is None:
-            _fail(el, "label without text", x.where)
-        x.put(o, "UIText", x.s(el.get("text")))
+        # A label whose text Interface Builder left empty (set at run time) has no
+        # text attribute; its nib carries no UIText, so the label decodes with nil
+        # text, as UILabel's own encoder skips a nil text. No golden covers it yet.
+        if el.get("text") is not None:
+            x.put(o, "UIText", x.s(el.get("text")))
         x.put(o, "UIFont", font(x, fd))
         tc = keyed_color(x, el, "textColor")
         if tc is None:

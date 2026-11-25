@@ -184,5 +184,39 @@ class CompileXibKeyValuePairs(unittest.TestCase):
         self.assertEqual(a.object_class(vals["UIObject"].payload), "UIView")
 
 
+class CompileXibEmptyLabel(unittest.TestCase):
+    """A label whose text was left empty in Interface Builder (filled at run
+    time) has no text attribute. It compiles, with no UIText, so the label
+    decodes with nil text."""
+
+    LABEL = """
+                <label opaque="NO" userInteractionEnabled="NO" contentMode="left" textAlignment="center" lineBreakMode="wordWrap" numberOfLines="0" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="l1"{text}>
+                    <rect key="frame" x="8.0" y="48.0" width="264" height="48"/>
+                    <fontDescription key="fontDescription" type="system" pointSize="14"/>
+                    <nil key="highlightedColor"/>
+                </label>"""
+
+    def label_values(self, text_attr):
+        view = VIEW.format(dst="-1", etype_attr="", extra="").replace(
+            "</subviews>", self.LABEL.format(text=text_attr) + "\n            </subviews>")
+        rc, err, data = compile_xib_xml(XIB.format(runtime="iOS.CocoaTouch",
+                                                   objects=PLACEHOLDERS + view))
+        self.assertEqual(rc, 0, err)
+        a = nibarchive.parse(data)
+        labels = [i for i, _ in enumerate(a.objects) if a.object_class(i) == "UILabel"]
+        self.assertEqual(len(labels), 1)
+        return a, {a.key(v.key_idx): v for v in a.object_values(a.objects[labels[0]])}
+
+    def test_label_without_text(self):
+        _, vals = self.label_values("")
+        self.assertNotIn("UIText", vals)
+        self.assertIn("UIFont", vals)
+        self.assertIn("UITextColor", vals)
+
+    def test_label_with_text_keeps_it(self):
+        a, vals = self.label_values(' text="Hi"')
+        self.assertTrue(a.render(vals["UIText"]).startswith("string 'Hi'"))
+
+
 if __name__ == "__main__":
     unittest.main()

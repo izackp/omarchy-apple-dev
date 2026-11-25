@@ -2,6 +2,11 @@
 
 ## v0.4.3
 
+### ibtool compiles labels left empty in Interface Builder
+
+- A `<label>` with no `text` attribute (its text cleared in Interface Builder, to be set at run time) stopped `tools/ibxib.py` with `label without text`. `tools/ibtool` then fell back to its own builders, which refuse a Files Owner with outlets, so the error a build showed was `<placeholder> has unsupported subelement(s) ['connections']`, naming the wrong element. The label now compiles with every key it had before except `UIText`, so it decodes with nil text, as `UILabel`'s own encoder leaves out a nil text. No Apple golden covers this case yet.
+- `tests/test_ibtool_compile_xib.py` compiles a text-less label (no `UIText`; font and text color still there) and a label with text (its `UIText` kept). The self-test's 79 goldens are unchanged.
+
 ### asc.py states its cryptography requirement
 
 - `tools/asc.py` needs `cryptography` 42 or later: `certificate()` and `make_test_profile()` read `Certificate.not_valid_after_utc`, which cryptography added in 42.0.0. On an older module a command would fail with an `AttributeError` in the middle of its work. Run as `identity` or `test-identity` (the only commands that reach those two functions), `asc.py` now checks the version first and stops with `asc.py: needs cryptography 42 or later (Certificate.not_valid_after_utc); this python has 41.0.7. Upgrade it: <python> -m pip install -U cryptography`. The check is in the command-line block and covers those two commands only, so `validate`, `stamp`, `frameworks`, `given-identity` and `upload`, `provision-dev.py`, `provision-mac.py` and the tests that import `asc` as a module behave as before on an older module.
