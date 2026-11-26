@@ -945,19 +945,33 @@ def placeholder_hits(node, where=""):
 
 
 def _check_bundle_layout(check, names, apps):
-    """Zip layout: everything under Payload/, no junk, exactly one .app."""
-    check(all(n.startswith("Payload/") for n in names), "every entry is under Payload/")
+    """Zip layout: everything under Payload/ (or SwiftSupport/, as Xcode's export adds for an
+    embedded Swift runtime library), no junk, exactly one .app."""
+    check(all(n.startswith(("Payload/", "SwiftSupport/")) for n in names),
+          "every entry is under Payload/ or SwiftSupport/")
     check(not any("__MACOSX" in n or n.endswith(".DS_Store") for n in names), "no __MACOSX or .DS_Store")
     if not check(len(apps) == 1, f"exactly one app bundle in Payload/: {apps}"):
         sys.exit(1)
 
 
 def _check_bundle_contents(check, app, rcodesign):
-    """Frameworks: extensions carry none, no loose dylibs, FMWK + signed."""
+    """Frameworks: extensions carry none, no loose dylibs, FMWK + signed.
+
+    A Swift runtime library Xcode back-deploys (libswiftCompatibilitySpan.dylib for an app
+    built with the iOS 26 SDK that runs on an older iOS) is the exception: Xcode's export
+    leaves it loose in Frameworks/ and puts Apple's copy in SwiftSupport/iphoneos/ beside
+    Payload/. App Store processing wants that copy (ITMS-90426), so one is required."""
     nested = sorted(p.parent.name for p in app.glob("PlugIns/*.appex/Frameworks"))
     check(not nested, f"app extensions carry no Frameworks/ (ITMS-90206){': ' + ', '.join(nested) if nested else ''}")
-    loose = sorted(p.name for p in app.glob("Frameworks/*.dylib"))
+    dylibs = sorted(p.name for p in app.glob("Frameworks/*.dylib"))
+    runtime = [n for n in dylibs if n.startswith("libswift")]
+    loose = [n for n in dylibs if n not in runtime]
     check(not loose, f"no loose dylibs in Frameworks/ (ITMS-90426){': ' + ', '.join(loose) if loose else ''}")
+    if runtime:
+        support = app.parent.parent / "SwiftSupport" / "iphoneos"
+        missing = [n for n in runtime if not (support / n).is_file()]
+        check(not missing, "Swift runtime libraries in Frameworks/ are also in SwiftSupport/iphoneos/ (ITMS-90426)"
+              f"{': missing ' + ', '.join(missing) if missing else ''}")
     for framework in sorted(app.glob("Frameworks/*.framework")):
         with (framework / "Info.plist").open("rb") as f:
             finfo = plistlib.load(f)

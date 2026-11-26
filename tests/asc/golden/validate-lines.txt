@@ -16,7 +16,7 @@ ok   UIDeviceFamily [1] has only iPhone/iPad (ITMS-90100)
 ok   app extensions carry no Frameworks/ (ITMS-90206)
 ok   arm64 MH_EXECUTE
 ok   built against the device SDK: iphoneos27.0
-ok   every entry is under Payload/
+ok   every entry is under Payload/ or SwiftSupport/
 ok   exactly one app bundle in Payload/: ['Fixture.app']
 ok   executable Fixture is a thin 64-bit Mach-O
 ok   launch screen declared
